@@ -75,8 +75,13 @@ nix flake check -L
 
 Positive coverage includes explicit environment/input round trips and accepted exits. Negative coverage includes malformed requests, bounded output floods, deadlines, cancellation, and descendant-held pipe cleanup.
 
-See [`ADOPTION.md`](ADOPTION.md) for the Mantle and Octet cutover gate.
+See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence and [`ADOPTION.md`](ADOPTION.md) for the authoritative cutover gate.
 
 ## License
 
 AGPL-3.0-or-later. See [`LICENSE`](LICENSE).
+
+## References
+
+- [Mantle](https://github.com/OnixResearch/mantle), bounded external-batch process adapter at pilot base revision `26c6880c08cd730c9e9420f92ea91a87212e492d`.
+- [Octet](https://github.com/OnixResearch/octet), bounded Aeneas process adapter at pilot base revision `28ffbe8cfb01879a241cad248008b75252a8b7f5`.

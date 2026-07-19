@@ -7,7 +7,7 @@ The standalone test matrix covers the two first-wave consumer policies:
 - **Mantle-equivalent strict capture:** clean environment, piped stdin, accepted zero exit, timeout, process-group teardown, and rejection when either retained-output bound is exceeded.
 - **Octet-equivalent truncating capture:** bounded retained prefixes, exact observed-byte counts, timeout classification, and successful exit classification when consumer policy permits truncation.
 
-These are mechanism-conformance tests, not consumer release evidence.
+A disposable migration against exact Mantle and Octet base revisions also passed both focused test suites and both consumer-focused Clippy rails. See [`PILOT.md`](PILOT.md) for commands, line reductions, retained consumer policy, and bounded caveats. These are pilot facts, not consumer release evidence.
 
 ## Cutover gate
 
@@ -18,10 +18,12 @@ After explicit publication authorization:
 1. publish one reviewed immutable commit without changing the AGPL license;
 2. pin `bounded-exec` and `bounded-exec-core` by exact Git revision in both consumers;
 3. align Cargo and Nix source identities in each consumer;
-4. replace Mantle's process mechanics in `src/external_batch_dispatch.rs` while retaining executable BLAKE3 verification, Slurm projection, protocol parsing, redaction, and product error codes in Mantle;
-5. replace Octet's process mechanics in `cargo-octet/src/aeneas_execution.rs` while retaining provider-path construction, environment allowlisting, stage ordering, log rendering, report validation, and proof/evidence claims in Octet;
-6. run standalone tests plus the focused pre-cutover consumer commands;
-7. remove duplicate pipe, polling, kill, reap, and capture helpers only after parity passes.
+4. add a reviewed explicit working-directory field to Mantle's Nickel-backed dispatcher command profile instead of preserving ambient current-directory behavior;
+5. replace Mantle's process mechanics in `src/external_batch_dispatch.rs` while retaining executable BLAKE3 verification, Slurm projection, protocol parsing, redaction, and product error codes in Mantle;
+6. replace Octet's process mechanics in `cargo-octet/src/aeneas_execution.rs` while retaining provider-path construction, environment allowlisting, stage ordering, log rendering, report validation, and proof/evidence claims in Octet;
+7. review the deliberate change from direct-child kill to process-group teardown in both consumers;
+8. run standalone tests plus the focused pre-cutover consumer commands;
+9. remove duplicate pipe, polling, kill, reap, and capture helpers only after parity passes.
 
 Focused consumer commands:
 
