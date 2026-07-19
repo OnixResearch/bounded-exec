@@ -81,6 +81,73 @@ pub enum LimitError {
     TeardownTimeoutZero,
 }
 
+/// Final bounded capture facts for one output stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturedOutput {
+    /// Retained prefix, never longer than the configured stream limit.
+    pub bytes: Vec<u8>,
+    /// Total bytes observed before the stream closed.
+    pub observed_bytes: usize,
+    /// Whether bytes beyond the retained prefix were discarded.
+    pub truncated: bool,
+}
+
+/// Pure bounded-retention state for one output stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureAccumulator {
+    retained: Vec<u8>,
+    observed_bytes: usize,
+    limit_bytes: usize,
+}
+
+impl CaptureAccumulator {
+    /// Start an empty capture with an explicit retention limit.
+    #[must_use]
+    pub fn new(limit_bytes: usize) -> Self {
+        Self {
+            retained: Vec::new(),
+            observed_bytes: 0,
+            limit_bytes,
+        }
+    }
+
+    /// Observe one byte chunk while retaining at most the configured prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the total observed-byte counter overflows.
+    pub fn observe(&mut self, bytes: &[u8]) -> Result<(), CaptureError> {
+        self.observed_bytes = self
+            .observed_bytes
+            .checked_add(bytes.len())
+            .ok_or(CaptureError::ObservedBytesOverflow)?;
+        let remaining_bytes = self.limit_bytes.saturating_sub(self.retained.len());
+        let retained_now = bytes.len().min(remaining_bytes);
+        self.retained.extend_from_slice(&bytes[..retained_now]);
+        Ok(())
+    }
+
+    /// Finish the capture and derive its truncation fact.
+    #[must_use]
+    pub fn finish(self) -> CapturedOutput {
+        let truncated = self.observed_bytes > self.retained.len();
+        debug_assert!(self.retained.len() <= self.limit_bytes);
+        debug_assert!(!truncated || self.retained.len() == self.limit_bytes);
+        CapturedOutput {
+            bytes: self.retained,
+            observed_bytes: self.observed_bytes,
+            truncated,
+        }
+    }
+}
+
+/// Pure capture-state failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureError {
+    /// The total observed-byte count cannot be represented by `usize`.
+    ObservedBytesOverflow,
+}
+
 /// Why execution stopped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Completion {
@@ -286,6 +353,37 @@ mod tests {
         assert_eq!(
             OutcomePolicy::new(vec![SUCCESS_EXIT_CODE, SUCCESS_EXIT_CODE], true, true),
             Err(PolicyError::AcceptedExitCodeDuplicate)
+        );
+    }
+
+    #[test]
+    fn capture_retains_a_prefix_and_reports_overflow() {
+        const CAPTURE_LIMIT_BYTES: usize = 4;
+        const FIRST_CHUNK: &[u8] = b"abc";
+        const SECOND_CHUNK: &[u8] = b"def";
+        let mut capture = CaptureAccumulator::new(CAPTURE_LIMIT_BYTES);
+        capture
+            .observe(FIRST_CHUNK)
+            .expect("first capture chunk fits the byte counter");
+        capture
+            .observe(SECOND_CHUNK)
+            .expect("second capture chunk fits the byte counter");
+        let finished = capture.finish();
+        let mut overflow = CaptureAccumulator {
+            retained: Vec::new(),
+            observed_bytes: usize::MAX,
+            limit_bytes: CAPTURE_LIMIT_BYTES,
+        };
+
+        assert_eq!(finished.bytes, b"abcd");
+        assert_eq!(
+            finished.observed_bytes,
+            FIRST_CHUNK.len() + SECOND_CHUNK.len()
+        );
+        assert!(finished.truncated);
+        assert_eq!(
+            overflow.observe(&[0]),
+            Err(CaptureError::ObservedBytesOverflow)
         );
     }
 

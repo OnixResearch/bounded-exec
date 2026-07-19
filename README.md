@@ -4,7 +4,7 @@ Product-neutral bounded child-process execution for Rust systems code.
 
 The repository separates deterministic policy from operating-system effects:
 
-- `bounded-exec-core` is `no_std` plus `alloc`. It validates explicit limits and classifies execution facts under consumer-owned exit and truncation policy.
+- `bounded-exec-core` is `no_std` plus `alloc`. It validates explicit limits, owns deterministic bounded-prefix retention, and classifies execution facts under consumer-owned exit and truncation policy.
 - `bounded-exec` is the standard-library shell. It spawns argv directly, applies explicit environment behavior, writes bounded input, drains stdout and stderr concurrently with bounded retention, enforces deadlines and cancellation, and tears down owned processes.
 
 On Unix, process-group scope places the child in a fresh group and terminates remaining descendants before capture workers are joined. Other platforms currently fall back to direct-child termination and make no descendant-teardown claim.

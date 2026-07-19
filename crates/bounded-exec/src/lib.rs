@@ -25,6 +25,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use bounded_exec_core::CaptureAccumulator;
+pub use bounded_exec_core::CapturedOutput;
 pub use bounded_exec_core::Completion;
 pub use bounded_exec_core::Disposition;
 pub use bounded_exec_core::ExecutionLimits;
@@ -95,17 +97,6 @@ pub struct RunRequest {
     pub termination_scope: TerminationScope,
     /// Consumer-owned result classification policy.
     pub outcome_policy: OutcomePolicy,
-}
-
-/// Retained bytes and total stream-observation facts.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CapturedOutput {
-    /// Retained prefix, never longer than the configured stream limit.
-    pub bytes: Vec<u8>,
-    /// Total bytes drained from the pipe.
-    pub observed_bytes: usize,
-    /// Whether bytes beyond the retained prefix were drained and discarded.
-    pub truncated: bool,
 }
 
 /// Result of one completed bounded execution.
@@ -507,8 +498,7 @@ fn read_bounded<R>(
 where
     R: Read,
 {
-    let mut retained = Vec::with_capacity(limit_bytes.min(CAPTURE_BUFFER_BYTES));
-    let mut observed_bytes = 0_usize;
+    let mut capture = CaptureAccumulator::new(limit_bytes);
     let mut buffer = [0_u8; CAPTURE_BUFFER_BYTES];
     loop {
         let read_bytes = reader.read(&mut buffer).map_err(|error| RunError::Io {
@@ -518,21 +508,11 @@ where
         if read_bytes == 0 {
             break;
         }
-        observed_bytes = observed_bytes
-            .checked_add(read_bytes)
-            .ok_or(RunError::CaptureCountOverflow(worker))?;
-        let remaining_bytes = limit_bytes.saturating_sub(retained.len());
-        let retained_now = read_bytes.min(remaining_bytes);
-        retained.extend_from_slice(&buffer[..retained_now]);
+        capture
+            .observe(&buffer[..read_bytes])
+            .map_err(|_error| RunError::CaptureCountOverflow(worker))?;
     }
-    let truncated = observed_bytes > retained.len();
-    debug_assert!(retained.len() <= limit_bytes);
-    debug_assert!(!truncated || retained.len() == limit_bytes);
-    Ok(CapturedOutput {
-        bytes: retained,
-        observed_bytes,
-        truncated,
-    })
+    Ok(capture.finish())
 }
 
 const fn read_operation(worker: Worker) -> Operation {
