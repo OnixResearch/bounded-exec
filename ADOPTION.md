@@ -1,0 +1,36 @@
+# Consumer adoption status
+
+## Proven boundary
+
+The standalone test matrix covers the two first-wave consumer policies:
+
+- **Mantle-equivalent strict capture:** clean environment, piped stdin, accepted zero exit, timeout, process-group teardown, and rejection when either retained-output bound is exceeded.
+- **Octet-equivalent truncating capture:** bounded retained prefixes, exact observed-byte counts, timeout classification, and successful exit classification when consumer policy permits truncation.
+
+These are mechanism-conformance tests, not consumer release evidence.
+
+## Cutover gate
+
+The configured repository `https://github.com/OnixResearch/bounded-exec` is not yet a published immutable source. Mantle and Octet must not depend on an ambient `../bounded-exec` path or claim an unpublished local commit as external dependency evidence.
+
+After explicit publication authorization:
+
+1. publish one reviewed immutable commit without changing the AGPL license;
+2. pin `bounded-exec` and `bounded-exec-core` by exact Git revision in both consumers;
+3. align Cargo and Nix source identities in each consumer;
+4. replace Mantle's process mechanics in `src/external_batch_dispatch.rs` while retaining executable BLAKE3 verification, Slurm projection, protocol parsing, redaction, and product error codes in Mantle;
+5. replace Octet's process mechanics in `cargo-octet/src/aeneas_execution.rs` while retaining provider-path construction, environment allowlisting, stage ordering, log rendering, report validation, and proof/evidence claims in Octet;
+6. run standalone tests plus the focused pre-cutover consumer commands;
+7. remove duplicate pipe, polling, kill, reap, and capture helpers only after parity passes.
+
+Focused consumer commands:
+
+```sh
+# Mantle
+nix develop -c cargo test -p mantle --bin mantle external_batch_dispatch::tests::
+
+# Octet
+nix develop -c cargo test -p cargo-octet --lib aeneas_execution::tests::
+```
+
+Cutover success means both focused suites retain their public behavior and product diagnostics while the generic mechanics come from the same exact published revision. It does not transfer Mantle build authority, Octet proof authority, Valence evidence authority, or Cairn release-readiness authority into this repository.
