@@ -2,11 +2,17 @@
 
 The current reviewed consumer revision is `29dac88ecded94457572db3fdfaaaab95fa91525`. Lattice names that exact commit in both Cargo and Nix configuration, so the pilot can change transport and repository identity without combining the result with a dependency upgrade.
 
-Bounded Exec owns only its Git history, repository metadata, publication receipt, and existing process-mechanism verification. OnixOS owns seed, HTTP, backup, and CI service observations. Lattice owns Cargo/Nix source alignment and consumer behavior.
+Bounded Exec owns only its Git history, repository metadata, publication receipt, and existing process-mechanism verification. `onix-core` owns concrete node, HTTP, machine, monitoring, backup, and restore observations. OnixOS owns forge catalog admission, independent-seed acceptance, CI policy, and cross-repository pilot acceptance. Lattice owns Cargo/Nix source alignment and consumer behavior.
 
-Completion means the existing commit is available under one recorded Radicle RID through the admitted service paths and Lattice consumes it without a GitHub fallback. Merely running `rad init`, adding a second remote, or publishing a mutable branch is false completion.
+Completion begins only after the `onix-core` bootstrap-node receipt and OnixOS catalog admission are accepted. It ends when the existing commit is available under one recorded Radicle RID through the admitted service paths and Lattice consumes it without a GitHub fallback. Merely running `rad init`, adding a second remote, or publishing a mutable branch is false completion.
 
 ## Decisions
+
+### Decision: Require concrete node evidence before publication
+
+**Choice:** Reject publication when the `onix-core` bootstrap-node receipt or its OnixOS catalog admission is absent, stale, malformed, policy-incompatible, or unable to acquire the exact probe object through the declared HTTPS path.
+
+**Rationale:** Repository identity and publication evidence must bind to an operating node rather than a planned hostname. The bootstrap receipt does not satisfy the later independent-seed outage gate.
 
 ### Decision: Preserve Git object identity
 
@@ -45,6 +51,7 @@ The publication evidence records:
 - canonical RID and exact reviewed Git object ID;
 - delegate and canonical-ref policy identities;
 - signed-reference feature policy;
+- accepted `onix-core` bootstrap/deployment and OnixOS catalog receipt identities;
 - seed and HTTPS endpoint identities without credentials;
 - exact clone/fetch/object verification commands and bounded outcomes;
 - one-seed-outage observations;

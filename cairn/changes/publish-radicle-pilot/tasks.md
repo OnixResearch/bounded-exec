@@ -1,8 +1,13 @@
+## Phase 0: Concrete node prerequisite
+
+- [ ] [serial] Verify the accepted `onix-core` bootstrap-node receipt and OnixOS catalog admission, including package baseline, node identity, exact-object HTTPS acquisition, least-authority boundary, restart persistence, restore result, and single-node non-claims. r[bounded_exec.radicle_publication.availability]
+- [ ] [parallel] Reject absent, stale, malformed, policy-incompatible, secret-bearing, GitHub-backed, or high-availability-overclaiming prerequisite evidence. r[bounded_exec.radicle_publication.evidence]
+
 ## Phase 1: Repository identity and publication
 
 - [ ] [serial] Confirm the reviewed publication object, reachable history, existing tags, license, and clean source state before creating the canonical Radicle repository identity. r[bounded_exec.radicle_publication.history]
 - [ ] [serial] Initialize and publish the repository without rewriting commits or tags, then record the RID, delegates, canonical refs, and minimum signed-reference policy. r[bounded_exec.radicle_publication.identity]
-- [ ] [serial] Seed the repository through the independently operated OnixOS paths and record stable HTTPS Git endpoints for ordinary clients. r[bounded_exec.radicle_publication.availability]
+- [ ] [serial] Seed the repository through the concrete `onix-core` paths admitted by the OnixOS catalog and record stable HTTPS Git endpoints for ordinary clients. r[bounded_exec.radicle_publication.availability]
 
 ## Phase 2: Exact-source evidence
 
@@ -20,4 +25,4 @@
 
 - [ ] [serial] Update Cargo repository metadata, `README.md`, and `ADOPTION.md` from the accepted RID and endpoint receipt while labeling GitHub as a transition mirror. r[bounded_exec.radicle_publication.identity]
 - [ ] [parallel] Document clone, exact-revision consumption, outage behavior, rollback, and publication non-claims without adding Radicle runtime behavior to either crate. r[bounded_exec.radicle_publication.evidence]
-- [ ] [serial] Run Cargo, Clippy, formatting, core WASM, Cairn, and Nix checks; sync and archive only after the OnixOS and Lattice evidence inputs are accepted. r[bounded_exec.radicle_publication.consumer]
+- [ ] [serial] Run Cargo, Clippy, formatting, core WASM, Cairn, and Nix checks; sync and archive only after the `onix-core`, OnixOS, and Lattice evidence inputs are accepted. r[bounded_exec.radicle_publication.consumer]
