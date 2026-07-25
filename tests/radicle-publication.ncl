@@ -22,7 +22,7 @@ in
       publication.is_rid receipt.repository.rid,
 
       rejected_as "publication-shape" {},
-      rejected_as "publication-header" (receipt & { status | force = "accepted" }),
+      rejected_as "publication-header" (receipt & { status | force = "published" }),
       rejected_as "publication-repository" (receipt & { repository.rid | force = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5" }),
       rejected_as "publication-repository" (receipt & { repository.reviewed_commit | force = missing_commit }),
       rejected_as "publication-repository" (receipt & { repository.source_archive_blake3 | force = digest_b }),
@@ -43,7 +43,8 @@ in
       rejected_as "publication-outage" (receipt & { outage.primary_only.public_fallback | force = "allowed" }),
       rejected_as "publication-rejection" (receipt & { rejection_probes.https_receive_pack | force = "accepted" }),
       rejected_as "publication-rejection" (receipt & { rejection_probes.native_undeclared_rid | force = "accepted" }),
-      rejected_as "publication-consumer-stage" (receipt & { consumer.status | force = "accepted" }),
+      rejected_as "publication-consumer-stage" (receipt & { consumer.status | force = "pending" }),
+      rejected_as "publication-consumer-stage" (receipt & { consumer.receipt_blake3 | force = digest_b }),
       rejected_as "publication-consumer-stage" (receipt & { consumer.github_fallback_configured | force = true }),
       rejected_as "publication-non-claims" (receipt & { non_claims | force = [] }),
       rejected_as

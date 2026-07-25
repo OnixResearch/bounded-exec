@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/OnixResearch/bounded-exec"
+repository = "https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git"
 publish = false
 
 [workspace.dependencies]

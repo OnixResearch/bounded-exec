@@ -17,12 +17,12 @@
 
 ## Phase 3: Consumer and outage pilot
 
-- [ ] [serial] Coordinate the independent Lattice Cargo/Nix source cutover while retaining the exact pre-pilot Bounded Exec revision. r[bounded_exec.radicle_publication.consumer]
+- [x] [serial] Coordinate the independent Lattice Cargo/Nix source cutover while retaining the exact pre-pilot Bounded Exec revision. r[bounded_exec.radicle_publication.consumer]
 - [x] [serial] Stop each seed independently and prove the surviving configured path can provide the exact dependency without consulting GitHub for Bounded Exec. r[bounded_exec.radicle_publication.availability]
-- [ ] [parallel] Run existing Bounded Exec verification and the focused Lattice dependency/source checks against the Radicle-backed source. r[bounded_exec.radicle_publication.consumer]
+- [x] [parallel] Run existing Bounded Exec verification and the focused Lattice dependency/source checks against the Radicle-backed source. r[bounded_exec.radicle_publication.consumer]
 
 ## Phase 4: Metadata and closeout
 
-- [ ] [serial] Update Cargo repository metadata, `README.md`, and `ADOPTION.md` from the accepted RID and endpoint receipt while labeling GitHub as a transition mirror. r[bounded_exec.radicle_publication.identity]
+- [x] [serial] Update Cargo repository metadata, `README.md`, and `ADOPTION.md` from the accepted RID and endpoint receipt while labeling GitHub as a transition mirror. r[bounded_exec.radicle_publication.identity]
 - [x] [parallel] Document clone, exact-revision consumption, outage behavior, rollback, and publication non-claims without adding Radicle runtime behavior to either crate. r[bounded_exec.radicle_publication.evidence]
-- [ ] [serial] Run Cargo, Clippy, formatting, core WASM, Cairn, and Nix checks; sync and archive only after the `onix-core`, OnixOS, and Lattice evidence inputs are accepted. r[bounded_exec.radicle_publication.consumer]
+- [x] [serial] Run Cargo, Clippy, formatting, core WASM, Cairn, and Nix checks; sync and archive only after the `onix-core`, OnixOS, and Lattice evidence inputs are accepted. r[bounded_exec.radicle_publication.consumer]

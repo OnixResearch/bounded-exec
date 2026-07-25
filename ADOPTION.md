@@ -14,7 +14,7 @@ A disposable migration against exact Mantle and Octet base revisions also passed
 The reviewed commit `29dac88ecded94457572db3fdfaaaab95fa91525` is now
 published as canonical Radicle project
 `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo` through the read-only HTTPS adapter
-`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`. The staged
+`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`. The accepted
 publication receipt is documented in
 [`docs/radicle-publication.md`](docs/radicle-publication.md). Maintained
 consumers must not use an ambient `../bounded-exec` path or configure an

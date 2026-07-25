@@ -5,13 +5,13 @@ Bounded Exec's canonical project identity is
 Git object `29dac88ecded94457572db3fdfaaaab95fa91525`; publication did not rewrite
 that commit or its reachable history.
 
-The staged publication receipt is generated from
+The accepted publication receipt is generated from
 [`evidence/radicle/publication-v1.ncl`](../evidence/radicle/publication-v1.ncl).
 Its deterministic JSON digest is
-`6eab0250b4bfefb6f6e91ec75d9786a76ded20bc052e2e624b44c6bc5b1cc9f7`.
-The receipt links the accepted Onix Core bootstrap and replica evidence to the
-OnixOS catalog. Its consumer field remains `pending` until Lattice records its
-own exact-source cutover receipt.
+`30112693cadd92ba749be5b02ae148cb4560994de282e7342274b2f88e3ac894`.
+The receipt links the accepted Onix Core bootstrap and replica evidence, OnixOS
+catalog admission, Lattice cutover receipt `a5a1c7dd…`, and OnixOS consumer
+acceptance revision `4395bca`.
 
 ## Clone and exact-revision consumption
 

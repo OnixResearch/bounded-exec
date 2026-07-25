@@ -99,6 +99,9 @@ let PublicationReceipt = {
       repository | String,
       receipt_blake3 | String,
       reviewed_commit | String,
+      source_revision | String,
+      lifecycle_archive_revision | String,
+      onixos_acceptance_revision | String,
       github_fallback_configured | Bool,
     },
   non_claims | Array String,
@@ -110,7 +113,7 @@ let delegate_count = 3 in
 let receipt | PublicationReceipt = {
   schema_version = 1,
   receipt_type = "bounded-exec.radicle-publication.v1",
-  status = "published",
+  status = "accepted",
   observed_date = "2026-07-25",
   repository = {
     rid = "rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo",
@@ -212,14 +215,16 @@ let receipt | PublicationReceipt = {
     native_missing_object = "rejected",
   },
   consumer = {
-    status = "pending",
+    status = "accepted",
     repository = "lattice",
-    receipt_blake3 = "pending",
+    receipt_blake3 = "a5a1c7dd49729ef8d131b1bea57f3557c6dc5ed665fc04d44caf9a67a2bf04f9",
     reviewed_commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+    source_revision = "d69ec49",
+    lifecycle_archive_revision = "ad17c7d",
+    onixos_acceptance_revision = "4395bca",
     github_fallback_configured = false,
   },
   non_claims = [
-    "lattice-cutover-complete",
     "bounded-exec-release-readiness",
     "consumer-behavior-correctness",
     "ci-correctness",
@@ -236,6 +241,9 @@ let receipt | PublicationReceipt = {
   ],
   evidence = [
     "cairn/changes/publish-radicle-pilot/evidence/publication-and-outage-2026-07-25.md",
+    "lattice:evidence/radicle/bounded-exec-cutover-v1.json",
+    "lattice:cairn/archive/2026-07-25-consume-bounded-exec-from-radicle/evidence/source-cutover-2026-07-25.md",
+    "onixos:cairn/changes/add-radicle-forge-pilot/evidence/lattice-cutover-acceptance-2026-07-25.md",
     "onix-core:evidence/radicle/bootstrap-v1.json",
     "onix-core:evidence/radicle/secondary-seed-v1.json",
     "onixos:fixtures/radicle/bounded-exec-catalog-v1.json",

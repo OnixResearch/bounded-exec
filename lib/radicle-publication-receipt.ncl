@@ -12,7 +12,8 @@ let _did_regex = "^did:key:z[1-9A-HJ-NP-Za-km-z]+$" in
 let _node_endpoint_regex = "^z[1-9A-HJ-NP-Za-km-z]+@[0-9.]+:[0-9]+$" in
 let _expected = {
   receipt_type = "bounded-exec.radicle-publication.v1",
-  status = "published",
+  status = "accepted",
+  consumer_receipt_blake3 = "a5a1c7dd49729ef8d131b1bea57f3557c6dc5ed665fc04d44caf9a67a2bf04f9",
   observed_date = "2026-07-25",
   rid = "rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo",
   commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
@@ -50,7 +51,6 @@ let _required_root_fields = [
 ]
 in
 let _required_non_claims = [
-  "lattice-cutover-complete",
   "bounded-exec-release-readiness",
   "consumer-behavior-correctness",
   "ci-correctness",
@@ -196,13 +196,17 @@ let _validate = fun receipt =>
         && receipt.rejection_probes.native_undeclared_rid == "rejected"
         && receipt.rejection_probes.native_missing_object == "rejected" then null
       else _error "publication-rejection" "negative publication probes did not reject the request",
-      if _has_fields ["status", "repository", "receipt_blake3", "reviewed_commit", "github_fallback_configured"] receipt.consumer
-        && receipt.consumer.status == "pending"
+      if _has_fields ["status", "repository", "receipt_blake3", "reviewed_commit", "source_revision", "lifecycle_archive_revision", "onixos_acceptance_revision", "github_fallback_configured"] receipt.consumer
+        && receipt.consumer.status == "accepted"
         && receipt.consumer.repository == "lattice"
-        && receipt.consumer.receipt_blake3 == "pending"
+        && _is_blake3 receipt.consumer.receipt_blake3
+        && receipt.consumer.receipt_blake3 == _expected.consumer_receipt_blake3
         && receipt.consumer.reviewed_commit == _expected.commit
+        && receipt.consumer.source_revision == "d69ec49"
+        && receipt.consumer.lifecycle_archive_revision == "ad17c7d"
+        && receipt.consumer.onixos_acceptance_revision == "4395bca"
         && !receipt.consumer.github_fallback_configured then null
-      else _error "publication-consumer-stage" "the staged receipt must not claim the pending Lattice cutover",
+      else _error "publication-consumer-stage" "the accepted Lattice cutover linkage does not match",
       if std.is_array receipt.non_claims
         && _required_non_claims |> std.array.all (fun non_claim => std.array.elem non_claim receipt.non_claims) then null
       else _error "publication-non-claims" "required publication non-claims are missing",

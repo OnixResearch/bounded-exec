@@ -49,11 +49,28 @@ egress, and acquired the same exact commit and source hash from Aspen1 node
 RID was rejected. The desktop node and policy timer were active after the trap
 restored service.
 
-## Receipt state
+## Consumer closeout
 
-The staged publication receipt has status `published`. Its Lattice consumer
-link remains explicitly `pending`; no source cutover, lockfile change, consumer
-push, or release is claimed by this evidence.
+Lattice changed Cargo, Nix, Crane, and generated lock identities to the exact
+Radicle-backed HTTPS source at the reviewed commit in revision `d69ec49`, then
+archived its accepted change at `ad17c7d`. Its BLAKE3-bound cutover receipt is
+`a5a1c7dd49729ef8d131b1bea57f3557c6dc5ed665fc04d44caf9a67a2bf04f9`.
+OnixOS accepted that receipt at `4395bca`. The final publication receipt has
+status `accepted` and BLAKE3
+`30112693cadd92ba749be5b02ae148cb4560994de282e7342274b2f88e3ac894`.
+No release is claimed by this evidence.
+
+## Final validation
+
+- `cargo test --workspace`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- `cargo fmt --all -- --check`: passed
+- `cargo check -p bounded-exec-core --target wasm32-unknown-unknown`: passed
+- publication receipt positive/negative Nickel check: passed
+- Cairn proposal/design/tasks gates: passed
+- `nix flake check -L`: passed on `x86_64-linux`; `aarch64-linux` was omitted as an incompatible local system
+- Lattice focused source validator: 6 passed
+- Lattice focused bounded-process matrix: 21 passed
 
 ## Non-claims
 

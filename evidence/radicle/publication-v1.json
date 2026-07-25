@@ -18,10 +18,13 @@
   },
   "consumer": {
     "github_fallback_configured": false,
-    "receipt_blake3": "pending",
+    "lifecycle_archive_revision": "ad17c7d",
+    "onixos_acceptance_revision": "4395bca",
+    "receipt_blake3": "a5a1c7dd49729ef8d131b1bea57f3557c6dc5ed665fc04d44caf9a67a2bf04f9",
     "repository": "lattice",
     "reviewed_commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
-    "status": "pending"
+    "source_revision": "d69ec49",
+    "status": "accepted"
   },
   "endpoints": {
     "github_fallback_configured": false,
@@ -34,6 +37,9 @@
   },
   "evidence": [
     "cairn/changes/publish-radicle-pilot/evidence/publication-and-outage-2026-07-25.md",
+    "lattice:evidence/radicle/bounded-exec-cutover-v1.json",
+    "lattice:cairn/archive/2026-07-25-consume-bounded-exec-from-radicle/evidence/source-cutover-2026-07-25.md",
+    "onixos:cairn/changes/add-radicle-forge-pilot/evidence/lattice-cutover-acceptance-2026-07-25.md",
     "onix-core:evidence/radicle/bootstrap-v1.json",
     "onix-core:evidence/radicle/secondary-seed-v1.json",
     "onixos:fixtures/radicle/bounded-exec-catalog-v1.json",
@@ -58,7 +64,6 @@
     "signed_refs_feature": "parent"
   },
   "non_claims": [
-    "lattice-cutover-complete",
     "bounded-exec-release-readiness",
     "consumer-behavior-correctness",
     "ci-correctness",
@@ -138,5 +143,5 @@
     "source_archive_blake3": "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927"
   },
   "schema_version": 1,
-  "status": "published"
+  "status": "accepted"
 }

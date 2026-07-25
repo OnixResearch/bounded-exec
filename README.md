@@ -88,7 +88,7 @@ Positive coverage includes explicit environment/input round trips and accepted e
 
 See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence,
 [`ADOPTION.md`](ADOPTION.md) for the authoritative consumer cutover gate, and
-[`docs/radicle-publication.md`](docs/radicle-publication.md) for the staged
+[`docs/radicle-publication.md`](docs/radicle-publication.md) for the accepted
 Radicle publication receipt.
 
 ## License
