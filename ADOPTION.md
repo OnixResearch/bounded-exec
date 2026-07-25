@@ -11,11 +11,18 @@ A disposable migration against exact Mantle and Octet base revisions also passed
 
 ## Cutover gate
 
-The configured repository `https://github.com/OnixResearch/bounded-exec` is not yet a published immutable source. Mantle and Octet must not depend on an ambient `../bounded-exec` path or claim an unpublished local commit as external dependency evidence.
+The reviewed commit `29dac88ecded94457572db3fdfaaaab95fa91525` is now
+published as canonical Radicle project
+`rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo` through the read-only HTTPS adapter
+`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`. The staged
+publication receipt is documented in
+[`docs/radicle-publication.md`](docs/radicle-publication.md). Maintained
+consumers must not use an ambient `../bounded-exec` path or configure an
+automatic GitHub fallback.
 
-After explicit publication authorization:
+After consumer-owned cutover authorization:
 
-1. publish one reviewed immutable commit without changing the AGPL license;
+1. consume the reviewed immutable commit without changing the AGPL license;
 2. pin `bounded-exec` and `bounded-exec-core` by exact Git revision in both consumers;
 3. align Cargo and Nix source identities in each consumer;
 4. add a reviewed explicit working-directory field to Mantle's Nickel-backed dispatcher command profile instead of preserving ambient current-directory behavior;

@@ -91,6 +91,37 @@
                 cargo fmt --all -- --check
                 touch "$out"
               '';
+
+          radicle-publication-receipt =
+            pkgs.runCommand "bounded-exec-radicle-publication-receipt"
+              {
+                nativeBuildInputs = [
+                  pkgs.b3sum
+                  pkgs.coreutils
+                  pkgs.diffutils
+                  pkgs.gnugrep
+                  pkgs.jq
+                  pkgs.nickel
+                ];
+                src = self;
+              }
+              ''
+                cd "$src"
+                expected_hash="$(cat evidence/radicle/publication-v1.blake3)"
+                actual_hash="$(b3sum evidence/radicle/publication-v1.json | cut -d ' ' -f 1)"
+                test "$actual_hash" = "$expected_hash"
+
+                nickel export --format json evidence/radicle/publication-v1.ncl \
+                  | jq -S . > "$TMPDIR/publication-from-nickel.json"
+                cmp evidence/radicle/publication-v1.json "$TMPDIR/publication-from-nickel.json"
+
+                nickel eval tests/radicle-publication.ncl > "$TMPDIR/result.ncl"
+                grep -q 'tests = true' "$TMPDIR/result.ncl"
+                printf '%s\n' \
+                  "Bounded Exec Radicle publication receipt accepted" \
+                  "publication_receipt_blake3=$expected_hash" \
+                  > "$out"
+              '';
         }
       );
 
@@ -107,6 +138,9 @@
           default = pkgs.mkShell {
             packages = [
               toolchain
+              pkgs.b3sum
+              pkgs.jq
+              pkgs.nickel
               pkgs.nixfmt
             ];
           };

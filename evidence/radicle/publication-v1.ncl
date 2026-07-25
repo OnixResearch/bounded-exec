@@ -1,0 +1,247 @@
+# Canonical typed source for the staged Bounded Exec Radicle publication receipt.
+# Export with: nickel export --format json evidence/radicle/publication-v1.ncl
+let PublicationReceipt = {
+  schema_version | Number,
+  receipt_type | String,
+  status | String,
+  observed_date | String,
+  repository
+    | {
+      rid | String,
+      reviewed_commit | String,
+      object_type | String,
+      source_archive_blake3 | String,
+      default_branch | String,
+      license | String,
+      history_rewritten | Bool,
+    },
+  governance
+    | {
+      delegates | Array String,
+      canonical_approval_threshold | Number,
+      identity_approval_threshold | Number,
+      default_branch_approval_threshold | Number,
+      release_tag_approval_threshold | Number,
+      signed_refs_feature | String,
+      delegate_signed_main | Array String,
+    },
+  prerequisites
+    | {
+      bootstrap_receipt_type | String,
+      bootstrap_receipt_blake3 | String,
+      bootstrap_source_revision | String,
+      replica_receipt_type | String,
+      replica_receipt_blake3 | String,
+      replica_source_revision | String,
+      onixos_catalog_blake3 | String,
+      onixos_bootstrap_acceptance_revision | String,
+      onixos_replica_acceptance_revision | String,
+      onixos_catalog_status | String,
+    },
+  endpoints
+    | {
+      public_https_git | Array String,
+      primary_native_seed | String,
+      replica_native_seed | String,
+      public_https_origin_count | Number,
+      github_fallback_configured | Bool,
+    },
+  acquisition
+    | {
+      https_git | { status | String, commit | String, source_archive_blake3 | String },
+      primary_native | { status | String, commit | String, source_archive_blake3 | String },
+      replica_native | { status | String, commit | String, source_archive_blake3 | String },
+    },
+  outage
+    | {
+      replica_only
+        | {
+          unavailable_seed | String,
+          surviving_seed | String,
+          client_nid | String,
+          egress_allowlist | Array String,
+          commit | String,
+          source_archive_blake3 | String,
+          undeclared_rid | String,
+          missing_object | String,
+          public_fallback | String,
+          storage_access | String,
+          secret_access | String,
+        },
+      primary_only
+        | {
+          unavailable_seed | String,
+          surviving_seed | String,
+          client_nid | String,
+          egress_allowlist | Array String,
+          commit | String,
+          source_archive_blake3 | String,
+          undeclared_rid | String,
+          public_fallback | String,
+          storage_access | String,
+          secret_access | String,
+        },
+    },
+  rejection_probes
+    | {
+      https_unknown_rid | String,
+      https_receive_pack | String,
+      https_api | String,
+      https_root | String,
+      https_missing_revision | String,
+      https_missing_revision_status | Number,
+      native_undeclared_rid | String,
+      native_missing_object | String,
+    },
+  consumer
+    | {
+      status | String,
+      repository | String,
+      receipt_blake3 | String,
+      reviewed_commit | String,
+      github_fallback_configured | Bool,
+    },
+  non_claims | Array String,
+  evidence | Array String,
+}
+in
+let canonical_threshold = 2 in
+let delegate_count = 3 in
+let receipt | PublicationReceipt = {
+  schema_version = 1,
+  receipt_type = "bounded-exec.radicle-publication.v1",
+  status = "published",
+  observed_date = "2026-07-25",
+  repository = {
+    rid = "rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo",
+    reviewed_commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+    object_type = "commit",
+    source_archive_blake3 = "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+    default_branch = "main",
+    license = "AGPL-3.0-or-later",
+    history_rewritten = false,
+  },
+  governance = {
+    delegates = [
+      "did:key:z6MksnXbFoE8zkCkGWhHc8zuxpnEUhrJHv2KECRV4GSv9gkx",
+      "did:key:z6MkjCqx5ksRqcDeNeuEnz53udbUHebRLHhddCxecWJu9koE",
+      "did:key:z6MkmkA6sEzzMffaWqKEKJcDh8LjAzgrJLrTNi971KN3X6sh",
+    ],
+    canonical_approval_threshold = canonical_threshold,
+    identity_approval_threshold = canonical_threshold,
+    default_branch_approval_threshold = canonical_threshold,
+    release_tag_approval_threshold = canonical_threshold,
+    signed_refs_feature = "parent",
+    delegate_signed_main = [
+      "did:key:z6MksnXbFoE8zkCkGWhHc8zuxpnEUhrJHv2KECRV4GSv9gkx",
+      "did:key:z6MkjCqx5ksRqcDeNeuEnz53udbUHebRLHhddCxecWJu9koE",
+      "did:key:z6MkmkA6sEzzMffaWqKEKJcDh8LjAzgrJLrTNi971KN3X6sh",
+    ],
+  },
+  prerequisites = {
+    bootstrap_receipt_type = "onix.radicle.bootstrap.v1",
+    bootstrap_receipt_blake3 = "6113f11993c56ed1086ec61dfc905cbd07f77cc85027f45c6066e7662e5a7c52",
+    bootstrap_source_revision = "a9e6cea7",
+    replica_receipt_type = "onix.radicle.replica.v1",
+    replica_receipt_blake3 = "c53a296c5bd277ba032ffa35574634690c9a9debc76eaa68fa51cdd77a527e24",
+    replica_source_revision = "0632ff42",
+    onixos_catalog_blake3 = "f132c01a9d0edb4141201146c1dd5dc1eacfe77a2b080e6f99b2c4181d856655",
+    onixos_bootstrap_acceptance_revision = "b8425aa",
+    onixos_replica_acceptance_revision = "39aba12",
+    onixos_catalog_status = "accepted",
+  },
+  endpoints = {
+    public_https_git = ["https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git"],
+    primary_native_seed = "z6MkfpHAyrqSqhpiSGayy6AjB6L5UWkKLvsZvLh5hYD7XSu8@100.100.103.95:8776",
+    replica_native_seed = "z6MkkQCj5EczNiVzDzCkX9ewHNJ7NDEXSKbuRiS1x7o72yeG@100.110.43.11:8776",
+    public_https_origin_count = 1,
+    github_fallback_configured = false,
+  },
+  acquisition = {
+    https_git = {
+      status = "verified",
+      commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+      source_archive_blake3 = "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+    },
+    primary_native = {
+      status = "verified",
+      commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+      source_archive_blake3 = "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+    },
+    replica_native = {
+      status = "verified",
+      commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+      source_archive_blake3 = "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+    },
+  },
+  outage = {
+    replica_only = {
+      unavailable_seed = "aspen1",
+      surviving_seed = "britton-desktop",
+      client_nid = "z6MkohaTibsMAFB3CUWNuQ1p8eYuHtSrhupDnt2z2wPLGSJv",
+      egress_allowlist = ["100.110.43.11/32"],
+      commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+      source_archive_blake3 = "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+      undeclared_rid = "rejected",
+      missing_object = "rejected",
+      public_fallback = "blocked",
+      storage_access = "blocked",
+      secret_access = "blocked",
+    },
+    primary_only = {
+      unavailable_seed = "britton-desktop",
+      surviving_seed = "aspen1",
+      client_nid = "z6MkuAaWGg75i7kmb97mdsL6AKQqSwvfRdRhGpToiDKWmH3y",
+      egress_allowlist = ["100.100.103.95/32"],
+      commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+      source_archive_blake3 = "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+      undeclared_rid = "rejected",
+      public_fallback = "blocked",
+      storage_access = "blocked",
+      secret_access = "blocked",
+    },
+  },
+  rejection_probes = {
+    https_unknown_rid = "rejected-404",
+    https_receive_pack = "rejected-404",
+    https_api = "rejected-404",
+    https_root = "rejected-404",
+    https_missing_revision = "rejected-no-object",
+    https_missing_revision_status = 500,
+    native_undeclared_rid = "rejected",
+    native_missing_object = "rejected",
+  },
+  consumer = {
+    status = "pending",
+    repository = "lattice",
+    receipt_blake3 = "pending",
+    reviewed_commit = "29dac88ecded94457572db3fdfaaaab95fa91525",
+    github_fallback_configured = false,
+  },
+  non_claims = [
+    "lattice-cutover-complete",
+    "bounded-exec-release-readiness",
+    "consumer-behavior-correctness",
+    "ci-correctness",
+    "patch-review-correctness",
+    "radicle-protocol-mandatory-ci",
+    "second-public-https-origin",
+    "automatic-https-failover",
+    "geographic-or-building-power-independence",
+    "private-repository-confidentiality",
+    "whole-stack-github-independence",
+    "third-party-source-github-independence",
+    "seed-replication-confers-delegate-authority",
+    "transport-availability-proves-process-correctness",
+  ],
+  evidence = [
+    "cairn/changes/publish-radicle-pilot/evidence/publication-and-outage-2026-07-25.md",
+    "onix-core:evidence/radicle/bootstrap-v1.json",
+    "onix-core:evidence/radicle/secondary-seed-v1.json",
+    "onixos:fixtures/radicle/bounded-exec-catalog-v1.json",
+    "onixos:cairn/changes/add-radicle-forge-pilot/evidence/bounded-exec-governance-2026-07-25.md",
+    "onix-core:cairn/archive/2026-07-25-deploy-radicle-secondary-seed/evidence/britton-desktop-live-replica-2026-07-25.md",
+  ],
+}
+in
+receipt

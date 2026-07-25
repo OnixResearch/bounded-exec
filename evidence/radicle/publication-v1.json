@@ -1,0 +1,142 @@
+{
+  "acquisition": {
+    "https_git": {
+      "commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
+      "source_archive_blake3": "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+      "status": "verified"
+    },
+    "primary_native": {
+      "commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
+      "source_archive_blake3": "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+      "status": "verified"
+    },
+    "replica_native": {
+      "commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
+      "source_archive_blake3": "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+      "status": "verified"
+    }
+  },
+  "consumer": {
+    "github_fallback_configured": false,
+    "receipt_blake3": "pending",
+    "repository": "lattice",
+    "reviewed_commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
+    "status": "pending"
+  },
+  "endpoints": {
+    "github_fallback_configured": false,
+    "primary_native_seed": "z6MkfpHAyrqSqhpiSGayy6AjB6L5UWkKLvsZvLh5hYD7XSu8@100.100.103.95:8776",
+    "public_https_git": [
+      "https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git"
+    ],
+    "public_https_origin_count": 1,
+    "replica_native_seed": "z6MkkQCj5EczNiVzDzCkX9ewHNJ7NDEXSKbuRiS1x7o72yeG@100.110.43.11:8776"
+  },
+  "evidence": [
+    "cairn/changes/publish-radicle-pilot/evidence/publication-and-outage-2026-07-25.md",
+    "onix-core:evidence/radicle/bootstrap-v1.json",
+    "onix-core:evidence/radicle/secondary-seed-v1.json",
+    "onixos:fixtures/radicle/bounded-exec-catalog-v1.json",
+    "onixos:cairn/changes/add-radicle-forge-pilot/evidence/bounded-exec-governance-2026-07-25.md",
+    "onix-core:cairn/archive/2026-07-25-deploy-radicle-secondary-seed/evidence/britton-desktop-live-replica-2026-07-25.md"
+  ],
+  "governance": {
+    "canonical_approval_threshold": 2,
+    "default_branch_approval_threshold": 2,
+    "delegate_signed_main": [
+      "did:key:z6MksnXbFoE8zkCkGWhHc8zuxpnEUhrJHv2KECRV4GSv9gkx",
+      "did:key:z6MkjCqx5ksRqcDeNeuEnz53udbUHebRLHhddCxecWJu9koE",
+      "did:key:z6MkmkA6sEzzMffaWqKEKJcDh8LjAzgrJLrTNi971KN3X6sh"
+    ],
+    "delegates": [
+      "did:key:z6MksnXbFoE8zkCkGWhHc8zuxpnEUhrJHv2KECRV4GSv9gkx",
+      "did:key:z6MkjCqx5ksRqcDeNeuEnz53udbUHebRLHhddCxecWJu9koE",
+      "did:key:z6MkmkA6sEzzMffaWqKEKJcDh8LjAzgrJLrTNi971KN3X6sh"
+    ],
+    "identity_approval_threshold": 2,
+    "release_tag_approval_threshold": 2,
+    "signed_refs_feature": "parent"
+  },
+  "non_claims": [
+    "lattice-cutover-complete",
+    "bounded-exec-release-readiness",
+    "consumer-behavior-correctness",
+    "ci-correctness",
+    "patch-review-correctness",
+    "radicle-protocol-mandatory-ci",
+    "second-public-https-origin",
+    "automatic-https-failover",
+    "geographic-or-building-power-independence",
+    "private-repository-confidentiality",
+    "whole-stack-github-independence",
+    "third-party-source-github-independence",
+    "seed-replication-confers-delegate-authority",
+    "transport-availability-proves-process-correctness"
+  ],
+  "observed_date": "2026-07-25",
+  "outage": {
+    "primary_only": {
+      "client_nid": "z6MkuAaWGg75i7kmb97mdsL6AKQqSwvfRdRhGpToiDKWmH3y",
+      "commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
+      "egress_allowlist": [
+        "100.100.103.95/32"
+      ],
+      "public_fallback": "blocked",
+      "secret_access": "blocked",
+      "source_archive_blake3": "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+      "storage_access": "blocked",
+      "surviving_seed": "aspen1",
+      "unavailable_seed": "britton-desktop",
+      "undeclared_rid": "rejected"
+    },
+    "replica_only": {
+      "client_nid": "z6MkohaTibsMAFB3CUWNuQ1p8eYuHtSrhupDnt2z2wPLGSJv",
+      "commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
+      "egress_allowlist": [
+        "100.110.43.11/32"
+      ],
+      "missing_object": "rejected",
+      "public_fallback": "blocked",
+      "secret_access": "blocked",
+      "source_archive_blake3": "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927",
+      "storage_access": "blocked",
+      "surviving_seed": "britton-desktop",
+      "unavailable_seed": "aspen1",
+      "undeclared_rid": "rejected"
+    }
+  },
+  "prerequisites": {
+    "bootstrap_receipt_blake3": "6113f11993c56ed1086ec61dfc905cbd07f77cc85027f45c6066e7662e5a7c52",
+    "bootstrap_receipt_type": "onix.radicle.bootstrap.v1",
+    "bootstrap_source_revision": "a9e6cea7",
+    "onixos_bootstrap_acceptance_revision": "b8425aa",
+    "onixos_catalog_blake3": "f132c01a9d0edb4141201146c1dd5dc1eacfe77a2b080e6f99b2c4181d856655",
+    "onixos_catalog_status": "accepted",
+    "onixos_replica_acceptance_revision": "39aba12",
+    "replica_receipt_blake3": "c53a296c5bd277ba032ffa35574634690c9a9debc76eaa68fa51cdd77a527e24",
+    "replica_receipt_type": "onix.radicle.replica.v1",
+    "replica_source_revision": "0632ff42"
+  },
+  "receipt_type": "bounded-exec.radicle-publication.v1",
+  "rejection_probes": {
+    "https_api": "rejected-404",
+    "https_missing_revision": "rejected-no-object",
+    "https_missing_revision_status": 500,
+    "https_receive_pack": "rejected-404",
+    "https_root": "rejected-404",
+    "https_unknown_rid": "rejected-404",
+    "native_missing_object": "rejected",
+    "native_undeclared_rid": "rejected"
+  },
+  "repository": {
+    "default_branch": "main",
+    "history_rewritten": false,
+    "license": "AGPL-3.0-or-later",
+    "object_type": "commit",
+    "reviewed_commit": "29dac88ecded94457572db3fdfaaaab95fa91525",
+    "rid": "rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo",
+    "source_archive_blake3": "4fbbf8f0749262469f00748e04c775180488dba800303f139172656d25931927"
+  },
+  "schema_version": 1,
+  "status": "published"
+}

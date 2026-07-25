@@ -63,6 +63,17 @@ let observation = run(request)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+## Source publication
+
+The canonical Radicle project is `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo`. The
+reviewed pilot source is the exact Git object
+`29dac88ecded94457572db3fdfaaaab95fa91525`, available read-only at
+`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`. GitHub is a
+transition mirror, not an admitted dependency fallback.
+
+See [`docs/radicle-publication.md`](docs/radicle-publication.md) for clone,
+exact-revision consumption, outage, rollback, evidence, and non-claim details.
+
 ## Verification
 
 ```sh
@@ -75,7 +86,10 @@ nix flake check -L
 
 Positive coverage includes explicit environment/input round trips and accepted exits. Negative coverage includes malformed requests, bounded output floods, deadlines, cancellation, and descendant-held pipe cleanup.
 
-See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence and [`ADOPTION.md`](ADOPTION.md) for the authoritative cutover gate.
+See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence,
+[`ADOPTION.md`](ADOPTION.md) for the authoritative consumer cutover gate, and
+[`docs/radicle-publication.md`](docs/radicle-publication.md) for the staged
+Radicle publication receipt.
 
 ## License
 
