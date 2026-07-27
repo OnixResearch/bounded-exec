@@ -75,7 +75,10 @@ nix flake check -L
 
 Positive coverage includes explicit environment/input round trips and accepted exits. Negative coverage includes malformed requests, bounded output floods, deadlines, cancellation, and descendant-held pipe cleanup.
 
-See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence and [`ADOPTION.md`](ADOPTION.md) for the authoritative cutover gate.
+See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence,
+[`ADOPTION.md`](ADOPTION.md) for the authoritative cutover gate, and
+[`docs/radicle-ci-drill.md`](docs/radicle-ci-drill.md) for the boundary between
+patch CI and canonical admission.
 
 ## License
 
