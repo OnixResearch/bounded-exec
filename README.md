@@ -1,25 +1,35 @@
 # bounded-exec
 
-Product-neutral bounded child-process execution for Rust systems code.
+`bounded-exec` runs child processes with explicit limits. It provides product-neutral process mechanics for Rust systems code.
 
-The repository separates deterministic policy from operating-system effects:
+The repository separates pure policy from operating-system effects:
 
-- `bounded-exec-core` is `no_std` plus `alloc`. It validates explicit limits, owns deterministic bounded-prefix retention, and classifies execution facts under consumer-owned exit and truncation policy.
-- `bounded-exec` is the standard-library shell. It spawns argv directly, applies explicit environment behavior, writes bounded input, drains stdout and stderr concurrently with bounded retention, enforces deadlines and cancellation, and tears down owned processes.
+- `bounded-exec-core` is a `no_std` and `alloc` functional core. It checks limits, retains bounded output prefixes, and classifies execution facts.
+- `bounded-exec` is the standard-library shell. It starts processes, manages bounded I/O, applies deadlines and cancellation, and tears down owned processes.
 
-On Unix, process-group scope places the child in a fresh group and terminates remaining descendants before capture workers are joined. Other platforms currently fall back to direct-child termination and make no descendant-teardown claim.
+Consumers supply the exit-code and truncation policy. They must also supply every execution limit.
+
+On Unix, process-group scope starts the child in a new group. It terminates remaining descendants before it joins the capture workers.
+
+Other platforms terminate only the direct child. This repository makes no descendant-teardown claim for those platforms.
 
 ## Boundary
 
-This repository owns process mechanics only. Consumers retain:
+This repository owns only process mechanics. Consumers own these functions:
 
-- executable discovery, identity verification, and authorization;
-- sandbox, capability, seccomp, namespace, and network policy;
-- remote execution and transport protocols;
-- output parsing, redaction, and product diagnostics;
-- receipts, evidence roles, release readiness, and lifecycle decisions.
+- executable discovery, identity checks, and authorization
+- sandbox, capability, seccomp, namespace, and network policy
+- remote execution and transport protocols
+- output parsing, redaction, and product diagnostics
+- receipts, evidence roles, release readiness, and lifecycle decisions
 
-A successful `bounded-exec` result proves only the returned observation under the supplied request and host implementation. It does not prove sandboxing, hermeticity, child correctness, authorization, platform equivalence, or release eligibility.
+A successful result records an observation from the supplied request and host implementation. It does not prove any of these properties:
+
+- sandboxing or hermeticity
+- child correctness
+- executable authorization
+- platform equivalence
+- release eligibility
 
 ## Example
 
@@ -93,16 +103,25 @@ Successful preparation proves only that the selected output-retention capacity w
 
 ## Source publication
 
-The canonical Radicle project is `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo`. The
-reviewed pilot source is the exact Git object
-`29dac88ecded94457572db3fdfaaaab95fa91525`, available read-only at
-`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`. GitHub is a
-transition mirror, not an admitted dependency fallback.
+The canonical Radicle project is:
 
-See [`docs/radicle-publication.md`](docs/radicle-publication.md) for clone,
-exact-revision consumption, outage, rollback, evidence, and non-claim details.
+```text
+rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo
+```
 
-## Verification
+The reviewed pilot source is Git object `29dac88ecded94457572db3fdfaaaab95fa91525`. The source is available from this read-only URL:
+
+```text
+https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git
+```
+
+GitHub is a transition mirror. It is not an admitted dependency fallback.
+
+See [`docs/radicle-publication.md`](docs/radicle-publication.md) for clone, revision, outage, rollback, evidence, and non-claim details.
+
+## Checks
+
+Run all commands from the repository root:
 
 ```sh
 nix develop -c cargo fmt --all -- --check
@@ -112,16 +131,22 @@ nix develop -c cargo check -p bounded-exec-core --target wasm32-unknown-unknown
 nix flake check -L
 ```
 
-Positive coverage includes explicit environment/input round trips and accepted exits. Negative coverage includes malformed requests, bounded output floods, deadlines, cancellation, and descendant-held pipe cleanup.
+Positive tests cover explicit environment behavior, input round trips, and accepted exits. Negative tests cover these cases:
 
-See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence,
-[`ADOPTION.md`](ADOPTION.md) for the authoritative consumer cutover gate, and
-[`docs/radicle-publication.md`](docs/radicle-publication.md) for the accepted
-Radicle publication receipt.
+- malformed requests
+- output floods
+- deadlines and cancellation
+- descendant-held pipe cleanup
+
+For more information, read these documents:
+
+- [`PILOT.md`](PILOT.md): disposable two-consumer migration evidence
+- [`ADOPTION.md`](ADOPTION.md): the authoritative consumer cutover gate
+- [`docs/radicle-publication.md`](docs/radicle-publication.md): the accepted Radicle publication receipt
 
 ## License
 
-AGPL-3.0-or-later. See [`LICENSE`](LICENSE).
+This repository uses `AGPL-3.0-or-later`. See [`LICENSE`](LICENSE).
 
 ## References
 
