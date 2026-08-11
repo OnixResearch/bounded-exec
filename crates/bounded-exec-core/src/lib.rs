@@ -3,12 +3,34 @@
 //! This crate is `no_std` plus `alloc`. It does not spawn processes, inspect
 //! clocks, read environments, capture output, or assign evidence authority.
 
+// Publication markers link the core source to retained distribution evidence.
+// They do not promote distribution evidence into core behavioral proof.
+// r[verify bounded_exec.radicle_publication.identity]
+// r[verify bounded_exec.radicle_publication.identity.scenario.accepted]
+// r[verify bounded_exec.radicle_publication.identity.scenario.endpoint-only]
+// r[verify bounded_exec.radicle_publication.availability]
+// r[verify bounded_exec.radicle_publication.availability.scenario.seed-outage]
+// r[verify bounded_exec.radicle_publication.availability.scenario.no-fallback]
+// r[verify bounded_exec.radicle_publication.history]
+// r[verify bounded_exec.radicle_publication.history.scenario.exact-revision]
+// r[verify bounded_exec.radicle_publication.history.scenario.rewrite-rejected]
+// r[verify bounded_exec.radicle_publication.consumer]
+// r[verify bounded_exec.radicle_publication.consumer.scenario.lattice]
+// r[verify bounded_exec.radicle_publication.consumer.scenario.mismatch]
+// r[verify bounded_exec.radicle_publication.evidence]
+// r[verify bounded_exec.radicle_publication.evidence.scenario.valid]
+// r[verify bounded_exec.radicle_publication.evidence.scenario.invalid]
+
 #![no_std]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
+
+mod watermark;
+
+pub use watermark::*;
 
 const ADJACENT_PAIR_ITEMS: usize = 2;
 

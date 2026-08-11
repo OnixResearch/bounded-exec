@@ -63,6 +63,25 @@ let observation = run(request)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+## Resource-watermark admission
+
+<!-- r[impl bounded_exec.watermark.policy] -->
+<!-- r[impl bounded_exec.watermark.boundary] -->
+
+`bounded-exec-core` computes an admission decision from an explicit observation, low watermark, high watermark, and hysteresis state.
+
+Admission becomes deferred above the high watermark. It remains deferred until the observation reaches the low watermark.
+
+The caller retains these functions:
+
+- resource observation
+- scheduling and resource enforcement
+- process setup and execution
+- sandbox policy and enforcement
+- evidence and release decisions
+
+The Celld pressure-shedding mechanism is a bounded design reference only. Bounded Exec does not claim parity or implementation equivalence.
+
 ## Source publication
 
 The canonical Radicle project is `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo`. The
