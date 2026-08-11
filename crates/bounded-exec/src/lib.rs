@@ -26,6 +26,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use bounded_exec_core::CaptureAccumulator;
+pub use bounded_exec_core::CapturePrepareError;
 pub use bounded_exec_core::CapturedOutput;
 pub use bounded_exec_core::Completion;
 pub use bounded_exec_core::Disposition;
@@ -165,6 +166,13 @@ pub enum RunError {
     DuplicateEnvironmentName,
     /// Supplied stdin exceeds its configured bound.
     InputLimitExceeded,
+    /// Output retention capacity could not be prepared before spawn.
+    CapturePreparation {
+        /// Stream whose declared capacity could not be prepared.
+        worker: Worker,
+        /// Typed core preparation error.
+        error: CapturePrepareError,
+    },
     /// A configured pipe was unexpectedly unavailable.
     MissingPipe(Worker),
     /// An operating-system operation failed.
@@ -204,6 +212,11 @@ impl fmt::Display for RunError {
             Self::InputLimitExceeded => {
                 formatter.write_str("stdin exceeds its configured byte bound")
             }
+            Self::CapturePreparation { worker, error } => write!(
+                formatter,
+                "{worker:?} capture capacity {} could not be prepared",
+                error.requested_capacity()
+            ),
             Self::MissingPipe(worker) => write!(formatter, "{worker:?} pipe is unavailable"),
             Self::Io { operation, error } => write!(formatter, "{operation:?} failed: {error}"),
             Self::CaptureCountOverflow(worker) => {
@@ -266,6 +279,7 @@ fn run_inner(
         termination_scope,
         outcome_policy,
     } = request;
+    let prepared_captures = prepare_captures(limits)?;
     let mut command = prepare_command(&command_spec, termination_scope);
     let mut child = command.spawn().map_err(|error| RunError::Io {
         operation: Operation::Spawn,
@@ -280,8 +294,8 @@ fn run_inner(
     let stdout = take_required_stdout(&mut child, termination_scope, limits)?;
     let stderr = take_required_stderr(&mut child, termination_scope, limits)?;
     let stdin_worker = start_stdin_worker(stdin, command_spec.input);
-    let stdout_worker = start_capture_worker(stdout, limits.stdout_max_bytes, Worker::Stdout);
-    let stderr_worker = start_capture_worker(stderr, limits.stderr_max_bytes, Worker::Stderr);
+    let stdout_worker = start_capture_worker(stdout, prepared_captures.stdout, Worker::Stdout);
+    let stderr_worker = start_capture_worker(stderr, prepared_captures.stderr, Worker::Stderr);
 
     let (completion, exit_status) =
         wait_for_completion(&mut child, termination_scope, limits, cancellation)?;
@@ -314,6 +328,30 @@ fn run_inner(
         stderr,
         disposition,
     })
+}
+
+struct PreparedCaptures {
+    stdout: CaptureAccumulator,
+    stderr: CaptureAccumulator,
+}
+
+// r[impl bounded_exec.capture_capacity.pre_spawn]
+fn prepare_captures(limits: ExecutionLimits) -> Result<PreparedCaptures, RunError> {
+    let stdout = CaptureAccumulator::prepare(limits.stdout_max_bytes).map_err(|error| {
+        RunError::CapturePreparation {
+            worker: Worker::Stdout,
+            error,
+        }
+    })?;
+    let stderr = CaptureAccumulator::prepare(limits.stderr_max_bytes).map_err(|error| {
+        RunError::CapturePreparation {
+            worker: Worker::Stderr,
+            error,
+        }
+    })?;
+    assert!(stdout.prepared_capacity() >= stdout.limit_bytes());
+    assert!(stderr.prepared_capacity() >= stderr.limit_bytes());
+    Ok(PreparedCaptures { stdout, stderr })
 }
 
 fn validate_request(request: &RunRequest) -> Result<(), RunError> {
@@ -470,9 +508,10 @@ fn write_stdin(mut stdin: std::process::ChildStdin, bytes: &[u8]) -> Result<(), 
     })
 }
 
+// r[impl bounded_exec.capture_capacity.steady_state]
 fn start_capture_worker<R>(
     reader: R,
-    limit_bytes: usize,
+    capture: CaptureAccumulator,
     worker: Worker,
 ) -> WorkerHandle<CapturedOutput>
 where
@@ -480,7 +519,7 @@ where
 {
     let (sender, receiver) = mpsc::sync_channel(WORKER_CHANNEL_CAPACITY);
     let worker_thread = thread::spawn(move || {
-        let result = read_bounded(reader, limit_bytes, worker);
+        let result = read_bounded(reader, capture, worker);
         let _send_result = sender.send(result);
     });
     WorkerHandle {
@@ -492,13 +531,13 @@ where
 
 fn read_bounded<R>(
     mut reader: R,
-    limit_bytes: usize,
+    mut capture: CaptureAccumulator,
     worker: Worker,
 ) -> Result<CapturedOutput, RunError>
 where
     R: Read,
 {
-    let mut capture = CaptureAccumulator::new(limit_bytes);
+    let prepared_capacity = capture.prepared_capacity();
     let mut buffer = [0_u8; CAPTURE_BUFFER_BYTES];
     loop {
         let read_bytes = reader.read(&mut buffer).map_err(|error| RunError::Io {
@@ -511,6 +550,7 @@ where
         capture
             .observe(&buffer[..read_bytes])
             .map_err(|_error| RunError::CaptureCountOverflow(worker))?;
+        assert_eq!(capture.prepared_capacity(), prepared_capacity);
     }
     Ok(capture.finish())
 }
@@ -828,6 +868,36 @@ mod tests {
         assert_eq!(output.stdout.bytes, EXPECTED_OUTPUT_BYTES);
         assert_eq!(output.disposition, Disposition::Succeeded);
         assert!(started.elapsed() < Duration::from_secs(TEST_EXECUTION_UPPER_BOUND_SECS));
+    }
+
+    // r[verify bounded_exec.capture_capacity.pre_spawn]
+    // r[verify bounded_exec.capture_capacity.verification]
+    #[test]
+    fn capture_preparation_failure_precedes_spawn_for_each_stream() {
+        let mut stdout_failure = request("exit 0");
+        stdout_failure.command.program = PathBuf::from("/missing/bounded-exec-fixture");
+        stdout_failure.limits.stdout_max_bytes = usize::MAX;
+        let stdout_error = run(stdout_failure).expect_err("stdout preparation must fail");
+
+        let mut stderr_failure = request("exit 0");
+        stderr_failure.command.program = PathBuf::from("/missing/bounded-exec-fixture");
+        stderr_failure.limits.stderr_max_bytes = usize::MAX;
+        let stderr_error = run(stderr_failure).expect_err("stderr preparation must fail");
+
+        assert!(matches!(
+            stdout_error,
+            RunError::CapturePreparation {
+                worker: Worker::Stdout,
+                ..
+            }
+        ));
+        assert!(matches!(
+            stderr_error,
+            RunError::CapturePreparation {
+                worker: Worker::Stderr,
+                ..
+            }
+        ));
     }
 
     #[test]

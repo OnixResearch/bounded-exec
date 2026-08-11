@@ -120,17 +120,55 @@ pub struct CaptureAccumulator {
     retained: Vec<u8>,
     observed_bytes: usize,
     limit_bytes: usize,
+    prepared_capacity: usize,
 }
 
 impl CaptureAccumulator {
-    /// Start an empty capture with an explicit retention limit.
-    #[must_use]
-    pub fn new(limit_bytes: usize) -> Self {
-        Self {
-            retained: Vec::new(),
+    /// Reserve the complete explicit retention limit before observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapturePrepareError`] when the limit is zero or the allocator
+    /// cannot reserve the requested capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a successful vector reservation reports less capacity
+    /// than requested.
+    // r[impl bounded_exec.capture_capacity.preparation]
+    pub fn prepare(limit_bytes: usize) -> Result<Self, CapturePrepareError> {
+        if limit_bytes == 0 {
+            return Err(CapturePrepareError::new(limit_bytes));
+        }
+
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(limit_bytes)
+            .map_err(|_error| CapturePrepareError::new(limit_bytes))?;
+        let prepared_capacity = retained.capacity();
+        assert!(
+            prepared_capacity >= limit_bytes,
+            "successful reservation must cover the declared limit"
+        );
+
+        Ok(Self {
+            retained,
             observed_bytes: 0,
             limit_bytes,
-        }
+            prepared_capacity,
+        })
+    }
+
+    /// Return the declared retention limit.
+    #[must_use]
+    pub const fn limit_bytes(&self) -> usize {
+        self.limit_bytes
+    }
+
+    /// Return the capacity fixed during preparation.
+    #[must_use]
+    pub const fn prepared_capacity(&self) -> usize {
+        self.prepared_capacity
     }
 
     /// Observe one byte chunk while retaining at most the configured prefix.
@@ -138,6 +176,11 @@ impl CaptureAccumulator {
     /// # Errors
     ///
     /// Returns an error if the total observed-byte counter overflows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if internal prepared-capacity invariants were violated.
+    // r[impl bounded_exec.capture_capacity.steady_state]
     pub fn observe(&mut self, bytes: &[u8]) -> Result<(), CaptureError> {
         self.observed_bytes = self
             .observed_bytes
@@ -145,21 +188,54 @@ impl CaptureAccumulator {
             .ok_or(CaptureError::ObservedBytesOverflow)?;
         let remaining_bytes = self.limit_bytes.saturating_sub(self.retained.len());
         let retained_now = bytes.len().min(remaining_bytes);
+        assert!(
+            self.retained.len() + retained_now <= self.prepared_capacity,
+            "retained bytes must fit prepared capacity"
+        );
         self.retained.extend_from_slice(&bytes[..retained_now]);
+        assert_eq!(
+            self.retained.capacity(),
+            self.prepared_capacity,
+            "capture observation must not grow capacity"
+        );
         Ok(())
     }
 
     /// Finish the capture and derive its truncation fact.
+    ///
+    /// # Panics
+    ///
+    /// Panics if internal retention or prepared-capacity invariants were
+    /// violated.
     #[must_use]
     pub fn finish(self) -> CapturedOutput {
         let truncated = self.observed_bytes > self.retained.len();
-        debug_assert!(self.retained.len() <= self.limit_bytes);
-        debug_assert!(!truncated || self.retained.len() == self.limit_bytes);
+        assert!(self.retained.len() <= self.limit_bytes);
+        assert_eq!(self.retained.capacity(), self.prepared_capacity);
+        assert!(!truncated || self.retained.len() == self.limit_bytes);
         CapturedOutput {
             bytes: self.retained,
             observed_bytes: self.observed_bytes,
             truncated,
         }
+    }
+}
+
+/// Failure to reserve one explicit output-retention limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapturePrepareError {
+    requested_capacity: usize,
+}
+
+impl CapturePrepareError {
+    const fn new(requested_capacity: usize) -> Self {
+        Self { requested_capacity }
+    }
+
+    /// Return the capacity that preparation could not reserve.
+    #[must_use]
+    pub const fn requested_capacity(self) -> usize {
+        self.requested_capacity
     }
 }
 
@@ -378,23 +454,30 @@ mod tests {
         );
     }
 
+    // r[verify bounded_exec.capture_capacity.steady_state]
+    // r[verify bounded_exec.capture_capacity.verification]
     #[test]
-    fn capture_retains_a_prefix_and_reports_overflow() {
+    fn capture_retains_a_prefix_without_growing_and_reports_overflow() {
         const CAPTURE_LIMIT_BYTES: usize = 4;
         const FIRST_CHUNK: &[u8] = b"abc";
         const SECOND_CHUNK: &[u8] = b"def";
-        let mut capture = CaptureAccumulator::new(CAPTURE_LIMIT_BYTES);
+        let mut capture = CaptureAccumulator::prepare(CAPTURE_LIMIT_BYTES)
+            .expect("fixture capacity must prepare");
+        let prepared_capacity = capture.prepared_capacity();
         capture
             .observe(FIRST_CHUNK)
             .expect("first capture chunk fits the byte counter");
+        assert_eq!(capture.prepared_capacity(), prepared_capacity);
         capture
             .observe(SECOND_CHUNK)
             .expect("second capture chunk fits the byte counter");
+        assert_eq!(capture.prepared_capacity(), prepared_capacity);
         let finished = capture.finish();
         let mut overflow = CaptureAccumulator {
-            retained: Vec::new(),
+            retained: Vec::with_capacity(CAPTURE_LIMIT_BYTES),
             observed_bytes: usize::MAX,
             limit_bytes: CAPTURE_LIMIT_BYTES,
+            prepared_capacity: CAPTURE_LIMIT_BYTES,
         };
 
         assert_eq!(finished.bytes, b"abcd");
@@ -407,6 +490,42 @@ mod tests {
             overflow.observe(&[0]),
             Err(CaptureError::ObservedBytesOverflow)
         );
+    }
+
+    // r[verify bounded_exec.capture_capacity.preparation]
+    // r[verify bounded_exec.capture_capacity.boundary]
+    // r[verify bounded_exec.capture_capacity.verification]
+    #[test]
+    fn capture_preparation_is_explicit_and_fails_without_a_fallback() {
+        const CAPTURE_LIMIT_BYTES: usize = 4;
+        let prepared = CaptureAccumulator::prepare(CAPTURE_LIMIT_BYTES)
+            .expect("fixture capacity must prepare");
+        let zero = CaptureAccumulator::prepare(0).expect_err("zero limit must fail");
+        let impossible = CaptureAccumulator::prepare(usize::MAX)
+            .expect_err("unrepresentable capacity must fail");
+
+        assert_eq!(prepared.limit_bytes(), CAPTURE_LIMIT_BYTES);
+        assert!(prepared.prepared_capacity() >= CAPTURE_LIMIT_BYTES);
+        assert_eq!(zero.requested_capacity(), 0);
+        assert_eq!(impossible.requested_capacity(), usize::MAX);
+    }
+
+    #[test]
+    fn exact_limit_output_is_retained_without_growth_or_truncation() {
+        const EXACT_OUTPUT: &[u8] = b"exact";
+        let mut capture = CaptureAccumulator::prepare(EXACT_OUTPUT.len())
+            .expect("exact output capacity must prepare");
+        let prepared_capacity = capture.prepared_capacity();
+
+        capture
+            .observe(EXACT_OUTPUT)
+            .expect("exact output must fit the byte counter");
+        assert_eq!(capture.prepared_capacity(), prepared_capacity);
+        let finished = capture.finish();
+
+        assert_eq!(finished.bytes, EXACT_OUTPUT);
+        assert_eq!(finished.observed_bytes, EXACT_OUTPUT.len());
+        assert!(!finished.truncated);
     }
 
     #[test]

@@ -82,6 +82,15 @@ The caller retains these functions:
 
 The Celld pressure-shedding mechanism is a bounded design reference only. Bounded Exec does not claim parity or implementation equivalence.
 
+## Prepared output capture
+
+<!-- r[impl bounded_exec.capture_capacity.preparation] -->
+<!-- r[impl bounded_exec.capture_capacity.boundary] -->
+
+The shell reserves complete stdout and stderr retention capacity after request validation. It does this before child creation. If either reservation fails, the request returns a stream-specific error and starts no child. The capture workers receive the prepared buffers by value. They retain the declared prefix without later vector growth.
+
+Successful preparation proves only that the selected output-retention capacity was available at that time. It does not prove child execution, sandboxing, fixed latency, later host-memory stability, or process-wide zero allocation. Callers still own retention limits and execution policy.
+
 ## Source publication
 
 The canonical Radicle project is `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo`. The
