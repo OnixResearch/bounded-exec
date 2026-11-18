@@ -18,6 +18,7 @@ use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -39,6 +40,14 @@ pub use bounded_exec_core::PolicyError;
 
 const CAPTURE_BUFFER_BYTES: usize = 8_192;
 const WORKER_CHANNEL_CAPACITY: usize = 1;
+/// Extra time, beyond one poll interval, that a stopped worker gets to
+/// observe its stop flag and return before it is reported as detached.
+const WORKER_STOP_GRACE_MARGIN_MS: u64 = 100;
+/// Largest stdin chunk written after readiness. POSIX guarantees that a pipe
+/// write of at most `_POSIX_PIPE_BUF` bytes does not block once the pipe
+/// reports writable.
+#[cfg(unix)]
+const PIPE_NONBLOCKING_WRITE_BYTES: usize = 512;
 
 /// Whether the child inherits ambient environment variables.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -293,17 +302,28 @@ fn run_inner(
     };
     let stdout = take_required_stdout(&mut child, termination_scope, limits)?;
     let stderr = take_required_stderr(&mut child, termination_scope, limits)?;
-    let stdin_worker = start_stdin_worker(stdin, command_spec.input);
-    let stdout_worker = start_capture_worker(stdout, prepared_captures.stdout, Worker::Stdout);
-    let stderr_worker = start_capture_worker(stderr, prepared_captures.stderr, Worker::Stderr);
+    let poll_interval = Duration::from_millis(limits.poll_interval_ms);
+    let stdin_worker = start_stdin_worker(stdin, command_spec.input, poll_interval);
+    let stdout_worker = start_capture_worker(
+        stdout,
+        prepared_captures.stdout,
+        Worker::Stdout,
+        poll_interval,
+    );
+    let stderr_worker = start_capture_worker(
+        stderr,
+        prepared_captures.stderr,
+        Worker::Stderr,
+        poll_interval,
+    );
 
+    // Remaining process-group members are terminated inside
+    // `wait_for_completion`, before the direct child is reaped, so the group
+    // identifier cannot be recycled between exit and `killpg`.
     let (completion, exit_status) =
         wait_for_completion(&mut child, termination_scope, limits, cancellation)?;
-    if completion == Completion::Exited && termination_scope == TerminationScope::ProcessGroup {
-        terminate_remaining_process_group(child.id())?;
-    }
 
-    let teardown_budget = TeardownBudget::new(limits.teardown_timeout_ms);
+    let teardown_budget = TeardownBudget::new(limits.teardown_timeout_ms, limits.poll_interval_ms);
     let stdin_result = finish_stdin_worker(stdin_worker, completion, teardown_budget);
     let stdout_result = finish_worker(stdout_worker, teardown_budget);
     let stderr_result = finish_worker(stderr_worker, teardown_budget);
@@ -421,13 +441,17 @@ fn configure_termination_scope(_command: &mut Command, _scope: TerminationScope)
 struct TeardownBudget {
     started: Instant,
     timeout: Duration,
+    stop_grace: Duration,
 }
 
 impl TeardownBudget {
-    fn new(timeout_ms: u64) -> Self {
+    fn new(timeout_ms: u64, poll_interval_ms: u64) -> Self {
         Self {
             started: Instant::now(),
             timeout: Duration::from_millis(timeout_ms),
+            stop_grace: Duration::from_millis(
+                poll_interval_ms.saturating_add(WORKER_STOP_GRACE_MARGIN_MS),
+            ),
         }
     }
 
@@ -440,6 +464,82 @@ struct WorkerHandle<T> {
     worker: Worker,
     receiver: mpsc::Receiver<Result<T, RunError>>,
     thread: thread::JoinHandle<()>,
+    stop: Arc<AtomicBool>,
+}
+
+/// Pipe end usable by an I/O worker.
+///
+/// On Unix, workers wait for readiness with a bounded `poll` so that a pipe
+/// held open by an escaped descendant cannot pin the worker forever.
+#[cfg(unix)]
+trait WorkerPipe: std::os::fd::AsFd {}
+#[cfg(unix)]
+impl<T: std::os::fd::AsFd> WorkerPipe for T {}
+#[cfg(not(unix))]
+trait WorkerPipe {}
+#[cfg(not(unix))]
+impl<T> WorkerPipe for T {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Readiness {
+    Ready,
+    Stopped,
+}
+
+#[derive(Clone, Copy)]
+enum PipeDirection {
+    Read,
+    Write,
+}
+
+/// Wait until the pipe is ready or the stop flag is raised.
+///
+/// Readiness includes hang-up and error conditions; the following read or
+/// write observes them.
+#[cfg(unix)]
+fn wait_ready<P: WorkerPipe>(
+    pipe: &P,
+    direction: PipeDirection,
+    stop: &AtomicBool,
+    poll_interval: Duration,
+) -> io::Result<Readiness> {
+    use nix::errno::Errno;
+    use nix::poll::PollFd;
+    use nix::poll::PollFlags;
+    use nix::poll::PollTimeout;
+    use nix::poll::poll;
+
+    let events = match direction {
+        PipeDirection::Read => PollFlags::POLLIN,
+        PipeDirection::Write => PollFlags::POLLOUT,
+    };
+    let timeout = PollTimeout::try_from(poll_interval).unwrap_or(PollTimeout::MAX);
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(Readiness::Stopped);
+        }
+        let mut fds = [PollFd::new(pipe.as_fd(), events)];
+        match poll(&mut fds, timeout) {
+            Ok(0) | Err(Errno::EINTR) => {}
+            Ok(_) => return Ok(Readiness::Ready),
+            Err(error) => return Err(io::Error::from_raw_os_error(error as i32)),
+        }
+    }
+}
+
+/// Non-Unix platforms keep blocking I/O and make no detachment claim.
+#[cfg(not(unix))]
+fn wait_ready<P: WorkerPipe>(
+    _pipe: &P,
+    _direction: PipeDirection,
+    stop: &AtomicBool,
+    _poll_interval: Duration,
+) -> io::Result<Readiness> {
+    if stop.load(Ordering::Acquire) {
+        Ok(Readiness::Stopped)
+    } else {
+        Ok(Readiness::Ready)
+    }
 }
 
 fn take_required_stdin(
@@ -481,31 +581,64 @@ fn take_required_stderr(
 fn start_stdin_worker(
     stdin: Option<std::process::ChildStdin>,
     input: Input,
+    poll_interval: Duration,
 ) -> Option<WorkerHandle<()>> {
     let (Some(stdin), Input::Bytes(bytes)) = (stdin, input) else {
         return None;
     };
     let (sender, receiver) = mpsc::sync_channel(WORKER_CHANNEL_CAPACITY);
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
     let worker_thread = thread::spawn(move || {
-        let result = write_stdin(stdin, &bytes);
+        let result = write_stdin(stdin, &bytes, &worker_stop, poll_interval);
         let _send_result = sender.send(result);
     });
     Some(WorkerHandle {
         worker: Worker::Stdin,
         receiver,
         thread: worker_thread,
+        stop,
     })
 }
 
-fn write_stdin(mut stdin: std::process::ChildStdin, bytes: &[u8]) -> Result<(), RunError> {
-    stdin.write_all(bytes).map_err(|error| RunError::Io {
+fn write_stdin(
+    mut stdin: std::process::ChildStdin,
+    bytes: &[u8],
+    stop: &AtomicBool,
+    poll_interval: Duration,
+) -> Result<(), RunError> {
+    let write_error = |error| RunError::Io {
         operation: Operation::WriteStdin,
         error,
-    })?;
-    stdin.flush().map_err(|error| RunError::Io {
-        operation: Operation::WriteStdin,
-        error,
-    })
+    };
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        if wait_ready(&stdin, PipeDirection::Write, stop, poll_interval).map_err(write_error)?
+            == Readiness::Stopped
+        {
+            return Err(RunError::WorkerTeardownTimedOut(Worker::Stdin));
+        }
+        let chunk = &remaining[..remaining.len().min(stdin_chunk_bytes())];
+        match stdin.write(chunk) {
+            Ok(0) => {
+                return Err(write_error(io::Error::from(io::ErrorKind::WriteZero)));
+            }
+            Ok(written) => remaining = &remaining[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(write_error(error)),
+        }
+    }
+    stdin.flush().map_err(write_error)
+}
+
+#[cfg(unix)]
+const fn stdin_chunk_bytes() -> usize {
+    PIPE_NONBLOCKING_WRITE_BYTES
+}
+
+#[cfg(not(unix))]
+const fn stdin_chunk_bytes() -> usize {
+    CAPTURE_BUFFER_BYTES
 }
 
 // r[impl bounded_exec.capture_capacity.steady_state]
@@ -513,19 +646,23 @@ fn start_capture_worker<R>(
     reader: R,
     capture: CaptureAccumulator,
     worker: Worker,
+    poll_interval: Duration,
 ) -> WorkerHandle<CapturedOutput>
 where
-    R: Read + Send + 'static,
+    R: Read + WorkerPipe + Send + 'static,
 {
     let (sender, receiver) = mpsc::sync_channel(WORKER_CHANNEL_CAPACITY);
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
     let worker_thread = thread::spawn(move || {
-        let result = read_bounded(reader, capture, worker);
+        let result = read_bounded(reader, capture, worker, &worker_stop, poll_interval);
         let _send_result = sender.send(result);
     });
     WorkerHandle {
         worker,
         receiver,
         thread: worker_thread,
+        stop,
     }
 }
 
@@ -533,17 +670,29 @@ fn read_bounded<R>(
     mut reader: R,
     mut capture: CaptureAccumulator,
     worker: Worker,
+    stop: &AtomicBool,
+    poll_interval: Duration,
 ) -> Result<CapturedOutput, RunError>
 where
-    R: Read,
+    R: Read + WorkerPipe,
 {
+    let read_error = |error| RunError::Io {
+        operation: read_operation(worker),
+        error,
+    };
     let prepared_capacity = capture.prepared_capacity();
     let mut buffer = [0_u8; CAPTURE_BUFFER_BYTES];
     loop {
-        let read_bytes = reader.read(&mut buffer).map_err(|error| RunError::Io {
-            operation: read_operation(worker),
-            error,
-        })?;
+        if wait_ready(&reader, PipeDirection::Read, stop, poll_interval).map_err(read_error)?
+            == Readiness::Stopped
+        {
+            return Err(RunError::WorkerTeardownTimedOut(worker));
+        }
+        let read_bytes = match reader.read(&mut buffer) {
+            Ok(read_bytes) => read_bytes,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(read_error(error)),
+        };
         if read_bytes == 0 {
             break;
         }
@@ -577,8 +726,8 @@ fn wait_for_completion(
             let status = terminate_and_reap(child, scope, limits)?;
             return Ok((Completion::Cancelled, status));
         }
-        let status = match child.try_wait() {
-            Ok(status) => status,
+        let exited = match child_has_exited(child) {
+            Ok(exited) => exited,
             Err(error) => {
                 let wait_error = RunError::Io {
                     operation: Operation::Wait,
@@ -588,8 +737,8 @@ fn wait_for_completion(
                 return Err(wait_error);
             }
         };
-        if status.is_some() {
-            return Ok((Completion::Exited, status));
+        if exited {
+            return Ok((Completion::Exited, reap_exited(child, scope)?));
         }
         let elapsed = started.elapsed();
         if elapsed >= timeout {
@@ -598,6 +747,61 @@ fn wait_for_completion(
         }
         thread::sleep(poll_interval.min(timeout.saturating_sub(elapsed)));
     }
+}
+
+/// Report whether the direct child has exited.
+///
+/// Where `waitid(WNOWAIT)` is available, the exited child is left as an
+/// unreaped zombie so its PID, and therefore its process-group identifier,
+/// stays reserved until [`reap_exited`] has terminated remaining members.
+#[cfg(any(
+    target_os = "android",
+    all(target_os = "linux", not(target_env = "uclibc"))
+))]
+fn child_has_exited(child: &mut Child) -> io::Result<bool> {
+    use nix::errno::Errno;
+    use nix::sys::wait::Id;
+    use nix::sys::wait::WaitPidFlag;
+    use nix::sys::wait::WaitStatus;
+    use nix::sys::wait::waitid;
+    use nix::unistd::Pid;
+
+    let pid =
+        i32::try_from(child.id()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+    match waitid(Id::Pid(Pid::from_raw(pid)), flags) {
+        Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) => Ok(false),
+        Ok(_) => Ok(true),
+        Err(error) => Err(io::Error::from_raw_os_error(error as i32)),
+    }
+}
+
+/// Without `waitid(WNOWAIT)`, exit detection reaps the child. A later
+/// process-group termination can then race PID reuse; no stronger claim is
+/// made on these platforms.
+#[cfg(not(any(
+    target_os = "android",
+    all(target_os = "linux", not(target_env = "uclibc"))
+)))]
+fn child_has_exited(child: &mut Child) -> io::Result<bool> {
+    child.try_wait().map(|status| status.is_some())
+}
+
+/// Terminate remaining owned group members, then reap the exited child.
+fn reap_exited(child: &mut Child, scope: TerminationScope) -> Result<Option<ExitStatus>, RunError> {
+    let group_result = if scope == TerminationScope::ProcessGroup {
+        terminate_process_group(child.id())
+    } else {
+        Ok(())
+    };
+    // Reap even if group termination failed so no zombie is left behind.
+    // The child has already exited, so this does not block.
+    let status = child.wait().map_err(|error| RunError::Io {
+        operation: Operation::Reap,
+        error,
+    })?;
+    group_result?;
+    Ok(Some(status))
 }
 
 fn terminate_and_reap(
@@ -673,10 +877,6 @@ fn terminate_process_group(_child_id: u32) -> Result<(), RunError> {
     Ok(())
 }
 
-fn terminate_remaining_process_group(child_id: u32) -> Result<(), RunError> {
-    terminate_process_group(child_id)
-}
-
 fn finish_stdin_worker(
     worker: Option<WorkerHandle<()>>,
     completion: Completion,
@@ -720,6 +920,17 @@ fn finish_worker<T>(
             result
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
+            // A pipe is still held open, typically by a descendant that left
+            // the owned process group. Stop the worker so its thread and
+            // prepared buffer are released instead of leaking. On Unix the
+            // worker observes the flag within one poll interval.
+            worker.stop.store(true, Ordering::Release);
+            match worker.receiver.recv_timeout(teardown_budget.stop_grace) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _join_result = worker.thread.join();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
             Err(RunError::WorkerTeardownTimedOut(worker.worker))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -940,5 +1151,57 @@ mod tests {
             run(oversized_input),
             Err(RunError::InputLimitExceeded)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_capture_worker_returns_while_pipe_is_still_held_open() {
+        use std::os::unix::net::UnixStream;
+
+        const STOP_AFTER_MS: u64 = 50;
+        const WORKER_RETURN_UPPER_BOUND_MS: u64 = 1_000;
+        const EXHAUSTED_TEARDOWN_MS: u64 = 1;
+
+        // The held peer models a descendant that escaped the owned process
+        // group and keeps the write end of the capture pipe open.
+        let (reader, _held_peer) = UnixStream::pair().expect("socket pair must open");
+        let capture = CaptureAccumulator::prepare(TEST_OUTPUT_MAX_BYTES)
+            .expect("fixture capacity must prepare");
+        let worker = start_capture_worker(
+            reader,
+            capture,
+            Worker::Stdout,
+            Duration::from_millis(TEST_POLL_INTERVAL_MS),
+        );
+        thread::sleep(Duration::from_millis(STOP_AFTER_MS));
+        let started = Instant::now();
+
+        let result = finish_worker(
+            worker,
+            TeardownBudget::new(EXHAUSTED_TEARDOWN_MS, TEST_POLL_INTERVAL_MS),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RunError::WorkerTeardownTimedOut(Worker::Stdout))
+        ));
+        assert!(started.elapsed() < Duration::from_millis(WORKER_RETURN_UPPER_BOUND_MS));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_exit_reports_the_reaped_exit_status() {
+        const EXPECTED_EXIT_CODE: i32 = 7;
+
+        let mut request = request(&format!("exit {EXPECTED_EXIT_CODE}"));
+        request.outcome_policy = OutcomePolicy::new(vec![EXPECTED_EXIT_CODE], true, true)
+            .expect("fixture outcome policy is valid");
+
+        let output = run(request).expect("exited child is observed");
+
+        assert_eq!(output.completion, Completion::Exited);
+        assert_eq!(output.exit_code, Some(EXPECTED_EXIT_CODE));
+        assert_eq!(output.signal, None);
+        assert_eq!(output.disposition, Disposition::Succeeded);
     }
 }
