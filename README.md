@@ -91,6 +91,32 @@ The shell reserves complete stdout and stderr retention capacity after request v
 
 Successful preparation proves only that the selected output-retention capacity was available at that time. It does not prove child execution, sandboxing, fixed latency, later host-memory stability, or process-wide zero allocation. Callers still own retention limits and execution policy.
 
+## Cancellation
+
+<!-- r[impl bounded_exec.cancellation.pre_spawn] -->
+<!-- r[impl bounded_exec.cancellation.post_spawn] -->
+
+`run_with_cancellation` first reads the flag after request validation and capture preparation, before child creation. It then reads the flag on every poll. Invalid requests and failed capture preparation keep their errors. If the flag is already raised, no child is created. The result is `Completion::Cancelled` and `Disposition::Cancelled`, with no exit code or signal, empty captures, and input status `NotStarted`.
+
+If the flag is raised after spawn, the poll loop tears down the owned processes, reaps the direct child, and reports the reaped termination facts. A flag raised between the pre-spawn read and spawn is observed by the poll loop and handled the same way, so a child can start in that window.
+
+## Input delivery
+
+<!-- r[impl bounded_exec.input_delivery.fact] -->
+<!-- r[impl bounded_exec.input_delivery.reader_closed] -->
+<!-- r[impl bounded_exec.input_delivery.boundary] -->
+
+`ExecutionOutput::input` reports `offered_bytes`, `written_bytes`, and an `InputStatus`:
+
+- `NotStarted`: no child was created.
+- `NullDevice`: input was `Input::Null`.
+- `AllWritten`: every offered byte was written, then the runner closed the pipe.
+- `ReaderClosed`: the read end closed before every offered byte was written.
+
+A child may exit, close stdin, or be stopped without reading its input. The writer then sees broken pipe, connection reset, or connection aborted, and records `ReaderClosed`. That is never a run failure in any completion. The run is classified only by completion, exit code, and output policy. Other stdin write errors, zero-byte writes, and writers stopped by teardown still fail with their typed errors.
+
+Written bytes were accepted by the pipe. They do not prove that the child read, parsed, or acted on them. With small input and a child that exits without reading, either `AllWritten` or `ReaderClosed` can occur, depending on scheduling. Consumers that need proof of consumption must obtain it from the child's own output or protocol.
+
 ## Source publication
 
 The canonical Radicle project is `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo`. The
@@ -112,7 +138,7 @@ nix develop -c cargo check -p bounded-exec-core --target wasm32-unknown-unknown
 nix flake check -L
 ```
 
-Positive coverage includes explicit environment/input round trips and accepted exits. Negative coverage includes malformed requests, bounded output floods, deadlines, cancellation, and descendant-held pipe cleanup.
+Positive coverage includes explicit environment/input round trips, accepted exits, read-to-end input delivery, and a spawn control. Negative coverage includes malformed requests, bounded output floods, deadlines, pre-spawn cancellation proven by marker files over repeated runs, cancellation after spawn, unread input repeated sequentially and under parallel load, injected non-closure stdin errors, stopped writers, and descendant-held pipe cleanup.
 
 See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence,
 [`ADOPTION.md`](ADOPTION.md) for the authoritative consumer cutover gate, and

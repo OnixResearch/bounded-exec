@@ -118,12 +118,45 @@ pub struct ExecutionOutput {
     pub exit_code: Option<i32>,
     /// Unix termination signal, if one was available.
     pub signal: Option<i32>,
+    /// Bounded standard-input delivery facts.
+    pub input: InputDelivery,
     /// Bounded stdout capture.
     pub stdout: CapturedOutput,
     /// Bounded stderr capture.
     pub stderr: CapturedOutput,
     /// Product-neutral classification under the supplied outcome policy.
     pub disposition: Disposition,
+}
+
+/// Standard-input delivery facts for one execution.
+///
+/// Written bytes were accepted by the stdin pipe. They are not proof that the
+/// child read, parsed, or acted on any byte.
+// r[impl bounded_exec.input_delivery.fact]
+// r[impl bounded_exec.input_delivery.boundary]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InputDelivery {
+    /// Bytes the caller supplied through [`Input::Bytes`]; zero for [`Input::Null`].
+    pub offered_bytes: usize,
+    /// Bytes written into the stdin pipe, never more than `offered_bytes`.
+    pub written_bytes: usize,
+    /// How delivery ended.
+    pub status: InputStatus,
+}
+
+/// How standard-input delivery ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputStatus {
+    /// No child was created, so no byte was written.
+    NotStarted,
+    /// Standard input was the null device; no byte was offered.
+    NullDevice,
+    /// Every offered byte was written, then the runner closed the pipe.
+    AllWritten,
+    /// The read end closed before every offered byte was written, because
+    /// the child closed it, exited, or was terminated. This is a delivery
+    /// fact, not a run failure.
+    ReaderClosed,
 }
 
 /// Worker associated with a runner error.
@@ -258,18 +291,23 @@ impl std::error::Error for RunError {
 /// # Errors
 ///
 /// Returns an error when request validation, process operations, capture, or
-/// teardown fails. Timeouts and output-limit dispositions are successful
-/// observations and are returned in [`ExecutionOutput`].
+/// teardown fails. Timeouts, output-limit dispositions, and a child that
+/// closes stdin before reading all input are successful observations and are
+/// returned in [`ExecutionOutput`].
 pub fn run(request: RunRequest) -> Result<ExecutionOutput, RunError> {
     run_inner(request, None)
 }
 
 /// Execute a request while observing an explicit cancellation flag.
 ///
+/// A flag already raised after validation and capture preparation produces
+/// [`Completion::Cancelled`] without creating a child. A flag raised later
+/// produces [`Completion::Cancelled`] after owned-process teardown.
+///
 /// # Errors
 ///
-/// Returns the same infrastructure errors as [`run`]. A raised cancellation
-/// flag produces [`Completion::Cancelled`] after owned-process teardown.
+/// Returns the same infrastructure errors as [`run`]. Validation and capture
+/// preparation errors take precedence over a raised flag.
 pub fn run_with_cancellation(
     request: RunRequest,
     cancellation: &AtomicBool,
@@ -289,6 +327,22 @@ fn run_inner(
         outcome_policy,
     } = request;
     let prepared_captures = prepare_captures(limits)?;
+    // r[impl bounded_exec.cancellation.pre_spawn]
+    if cancellation_requested(cancellation) {
+        let input = InputDelivery {
+            offered_bytes: offered_input_bytes(&command_spec.input),
+            written_bytes: 0,
+            status: InputStatus::NotStarted,
+        };
+        return Ok(observation(
+            Completion::Cancelled,
+            None,
+            input,
+            prepared_captures.stdout.finish(),
+            prepared_captures.stderr.finish(),
+            &outcome_policy,
+        ));
+    }
     let mut command = prepare_command(&command_spec, termination_scope);
     let mut child = command.spawn().map_err(|error| RunError::Io {
         operation: Operation::Spawn,
@@ -324,12 +378,37 @@ fn run_inner(
         wait_for_completion(&mut child, termination_scope, limits, cancellation)?;
 
     let teardown_budget = TeardownBudget::new(limits.teardown_timeout_ms, limits.poll_interval_ms);
-    let stdin_result = finish_stdin_worker(stdin_worker, completion, teardown_budget);
+    let input_result = match stdin_worker {
+        Some(worker) => finish_worker(worker, teardown_budget),
+        None => Ok(InputDelivery {
+            offered_bytes: 0,
+            written_bytes: 0,
+            status: InputStatus::NullDevice,
+        }),
+    };
     let stdout_result = finish_worker(stdout_worker, teardown_budget);
     let stderr_result = finish_worker(stderr_worker, teardown_budget);
-    stdin_result?;
+    let input = input_result?;
     let stdout = stdout_result?;
     let stderr = stderr_result?;
+    Ok(observation(
+        completion,
+        exit_status,
+        input,
+        stdout,
+        stderr,
+        &outcome_policy,
+    ))
+}
+
+fn observation(
+    completion: Completion,
+    exit_status: Option<ExitStatus>,
+    input: InputDelivery,
+    stdout: CapturedOutput,
+    stderr: CapturedOutput,
+    outcome_policy: &OutcomePolicy,
+) -> ExecutionOutput {
     let exit_code = exit_status.and_then(|status| status.code());
     let signal = exit_status.and_then(exit_signal);
     let facts = OutcomeFacts {
@@ -338,16 +417,27 @@ fn run_inner(
         stdout_truncated: stdout.truncated,
         stderr_truncated: stderr.truncated,
     };
-    let disposition = bounded_exec_core::classify(facts, &outcome_policy);
-
-    Ok(ExecutionOutput {
+    let disposition = bounded_exec_core::classify(facts, outcome_policy);
+    ExecutionOutput {
         completion,
         exit_code,
         signal,
+        input,
         stdout,
         stderr,
         disposition,
-    })
+    }
+}
+
+fn cancellation_requested(cancellation: Option<&AtomicBool>) -> bool {
+    cancellation.is_some_and(|flag| flag.load(Ordering::Acquire))
+}
+
+fn offered_input_bytes(input: &Input) -> usize {
+    match input {
+        Input::Null => 0,
+        Input::Bytes(bytes) => bytes.len(),
+    }
 }
 
 struct PreparedCaptures {
@@ -388,11 +478,7 @@ fn validate_request(request: &RunRequest) -> Result<(), RunError> {
     if !request.command.current_dir.is_absolute() {
         return Err(RunError::CurrentDirectoryNotAbsolute);
     }
-    let input_bytes = match &request.command.input {
-        Input::Null => 0,
-        Input::Bytes(bytes) => bytes.len(),
-    };
-    if input_bytes > request.limits.stdin_max_bytes {
+    if offered_input_bytes(&request.command.input) > request.limits.stdin_max_bytes {
         return Err(RunError::InputLimitExceeded);
     }
     let mut names = BTreeSet::new();
@@ -582,7 +668,7 @@ fn start_stdin_worker(
     stdin: Option<std::process::ChildStdin>,
     input: Input,
     poll_interval: Duration,
-) -> Option<WorkerHandle<()>> {
+) -> Option<WorkerHandle<InputDelivery>> {
     let (Some(stdin), Input::Bytes(bytes)) = (stdin, input) else {
         return None;
     };
@@ -601,15 +687,25 @@ fn start_stdin_worker(
     })
 }
 
-fn write_stdin(
-    mut stdin: std::process::ChildStdin,
+// r[impl bounded_exec.input_delivery.reader_closed]
+// r[impl bounded_exec.input_delivery.write_errors]
+fn write_stdin<W>(
+    mut stdin: W,
     bytes: &[u8],
     stop: &AtomicBool,
     poll_interval: Duration,
-) -> Result<(), RunError> {
+) -> Result<InputDelivery, RunError>
+where
+    W: Write + WorkerPipe,
+{
     let write_error = |error| RunError::Io {
         operation: Operation::WriteStdin,
         error,
+    };
+    let delivery = |remaining: &[u8], status| InputDelivery {
+        offered_bytes: bytes.len(),
+        written_bytes: bytes.len() - remaining.len(),
+        status,
     };
     let mut remaining = bytes;
     while !remaining.is_empty() {
@@ -625,10 +721,24 @@ fn write_stdin(
             }
             Ok(written) => remaining = &remaining[written..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if is_reader_closure(&error) => {
+                return Ok(delivery(remaining, InputStatus::ReaderClosed));
+            }
             Err(error) => return Err(write_error(error)),
         }
     }
-    stdin.flush().map_err(write_error)
+    stdin.flush().map_err(write_error)?;
+    Ok(delivery(remaining, InputStatus::AllWritten))
+}
+
+/// Whether a stdin write error means every read end of the pipe is closed.
+fn is_reader_closure(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    )
 }
 
 #[cfg(unix)]
@@ -722,7 +832,8 @@ fn wait_for_completion(
     let timeout = Duration::from_millis(limits.timeout_ms);
     let poll_interval = Duration::from_millis(limits.poll_interval_ms);
     loop {
-        if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        // r[impl bounded_exec.cancellation.post_spawn]
+        if cancellation_requested(cancellation) {
             let status = terminate_and_reap(child, scope, limits)?;
             return Ok((Completion::Cancelled, status));
         }
@@ -877,36 +988,6 @@ fn terminate_process_group(_child_id: u32) -> Result<(), RunError> {
     Ok(())
 }
 
-fn finish_stdin_worker(
-    worker: Option<WorkerHandle<()>>,
-    completion: Completion,
-    teardown_budget: TeardownBudget,
-) -> Result<(), RunError> {
-    let Some(worker) = worker else {
-        return Ok(());
-    };
-    let result = finish_worker(worker, teardown_budget);
-    if completion != Completion::Exited && is_expected_stdin_shutdown(&result) {
-        return Ok(());
-    }
-    result
-}
-
-fn is_expected_stdin_shutdown(result: &Result<(), RunError>) -> bool {
-    match result {
-        Err(RunError::Io {
-            operation: Operation::WriteStdin,
-            error,
-        }) => matches!(
-            error.kind(),
-            io::ErrorKind::BrokenPipe
-                | io::ErrorKind::ConnectionReset
-                | io::ErrorKind::ConnectionAborted
-        ),
-        _ => false,
-    }
-}
-
 fn finish_worker<T>(
     worker: WorkerHandle<T>,
     teardown_budget: TeardownBudget,
@@ -975,6 +1056,25 @@ mod tests {
     const TEST_EXECUTION_UPPER_BOUND_SECS: u64 = 2;
     const NON_TERMINATING_SHELL_LOOP: &str = "while :; do :; done";
     const EXPECTED_OUTPUT_BYTES: &[u8] = b"bounded";
+    const LONG_TIMEOUT_MS: u64 = 10_000;
+    const MARKER_SCRIPT: &str = "printf started > \"$1\"";
+    const MARKER_WAIT_POLL_MS: u64 = 5;
+    const PRE_SPAWN_PROOF_RUNS: usize = 256;
+    const UNREAD_SMALL_INPUT: &[u8] = b"bounded\n";
+    /// Larger than any default pipe or socket buffer, so an unread write
+    /// cannot complete.
+    const PIPE_EXCEEDING_INPUT_BYTES: usize = 1 << 20;
+    const INPUT_FILL_BYTE: u8 = b'x';
+    const READ_TO_END_LINE: &[u8] = b"bounded\n";
+    /// 128 KiB of lines, twice the default Linux pipe buffer, so complete
+    /// delivery requires the child to read.
+    const READ_TO_END_LINES: usize = 16_384;
+    const SEQUENTIAL_UNREAD_RUNS: usize = 64;
+    const PARALLEL_UNREAD_WORKERS: usize = 8;
+    const PARALLEL_UNREAD_RUNS_PER_WORKER: usize = 16;
+    const FAULT_INPUT_BYTES: usize = 4_096;
+    const FAULT_ACCEPTED_BYTES: usize = 1_024;
+    const STOP_WRITER_AFTER_MS: u64 = 50;
 
     fn request(script: &str) -> RunRequest {
         RunRequest {
@@ -1000,6 +1100,56 @@ mod tests {
         }
     }
 
+    fn marker_request(script: &str, marker: &std::path::Path) -> RunRequest {
+        let mut request = request(script);
+        request.command.args.push(OsString::from("sh"));
+        request.command.args.push(marker.as_os_str().to_owned());
+        request
+    }
+
+    fn scratch_directory(label: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("bounded-exec-{label}-{}", std::process::id()));
+        let _stale = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("scratch directory must be created");
+        directory
+    }
+
+    fn pipe_exceeding_input() -> Vec<u8> {
+        vec![INPUT_FILL_BYTE; PIPE_EXCEEDING_INPUT_BYTES]
+    }
+
+    fn empty_capture() -> CapturedOutput {
+        CapturedOutput {
+            bytes: Vec::new(),
+            observed_bytes: 0,
+            truncated: false,
+        }
+    }
+
+    fn assert_piped_delivery_consistent(delivery: InputDelivery, offered_bytes: usize) {
+        assert_eq!(delivery.offered_bytes, offered_bytes);
+        match delivery.status {
+            InputStatus::AllWritten => assert_eq!(delivery.written_bytes, offered_bytes),
+            InputStatus::ReaderClosed => assert!(delivery.written_bytes < offered_bytes),
+            other => panic!("unexpected piped delivery status {other:?}"),
+        }
+    }
+
+    fn assert_unread_input_succeeds(input: &[u8]) -> InputDelivery {
+        let mut request = request("exit 0");
+        request.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+        request.command.input = Input::Bytes(input.to_vec());
+
+        let output = run(request).expect("unread input never fails a run");
+
+        assert_eq!(output.completion, Completion::Exited);
+        assert_eq!(output.exit_code, Some(SUCCESS_EXIT_CODE));
+        assert_eq!(output.disposition, Disposition::Succeeded);
+        assert_piped_delivery_consistent(output.input, input.len());
+        output.input
+    }
+
     #[cfg(unix)]
     #[test]
     fn explicit_environment_and_input_round_trip() {
@@ -1018,6 +1168,14 @@ mod tests {
         assert_eq!(output.stdout.bytes, b"bounded:input");
         assert_eq!(output.stdout.observed_bytes, output.stdout.bytes.len());
         assert!(!output.stdout.truncated);
+        assert_eq!(
+            output.input,
+            InputDelivery {
+                offered_bytes: b"input\n".len(),
+                written_bytes: b"input\n".len(),
+                status: InputStatus::AllWritten,
+            }
+        );
     }
 
     #[cfg(unix)]
@@ -1046,9 +1204,10 @@ mod tests {
         assert_eq!(truncating.disposition, Disposition::Succeeded);
     }
 
+    // r[verify bounded_exec.cancellation.pre_spawn]
     #[cfg(unix)]
     #[test]
-    fn timeout_and_preexisting_cancellation_tear_down_owned_processes() {
+    fn timeout_tears_down_and_preexisting_cancellation_stops_before_spawn() {
         let mut timeout_request = request(NON_TERMINATING_SHELL_LOOP);
         timeout_request.limits.timeout_ms = SHORT_TIMEOUT_MS;
         let timeout_started = Instant::now();
@@ -1062,6 +1221,9 @@ mod tests {
         assert!(timeout_started.elapsed() < Duration::from_secs(TEST_EXECUTION_UPPER_BOUND_SECS));
         assert_eq!(cancelled.completion, Completion::Cancelled);
         assert_eq!(cancelled.disposition, Disposition::Cancelled);
+        assert_eq!(cancelled.exit_code, None);
+        assert_eq!(cancelled.signal, None);
+        assert_eq!(cancelled.input.status, InputStatus::NotStarted);
     }
 
     #[cfg(unix)]
@@ -1203,5 +1365,369 @@ mod tests {
         assert_eq!(output.exit_code, Some(EXPECTED_EXIT_CODE));
         assert_eq!(output.signal, None);
         assert_eq!(output.disposition, Disposition::Succeeded);
+        assert_eq!(
+            output.input,
+            InputDelivery {
+                offered_bytes: 0,
+                written_bytes: 0,
+                status: InputStatus::NullDevice,
+            }
+        );
+    }
+
+    // r[verify bounded_exec.cancellation.pre_spawn]
+    // r[verify bounded_exec.cancellation.verification]
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_cancellation_never_spawns_while_the_control_does() {
+        let directory = scratch_directory("pre-spawn");
+        let cancellation = AtomicBool::new(true);
+        let expected = ExecutionOutput {
+            completion: Completion::Cancelled,
+            exit_code: None,
+            signal: None,
+            input: InputDelivery {
+                offered_bytes: UNREAD_SMALL_INPUT.len(),
+                written_bytes: 0,
+                status: InputStatus::NotStarted,
+            },
+            stdout: empty_capture(),
+            stderr: empty_capture(),
+            disposition: Disposition::Cancelled,
+        };
+
+        for attempt in 0..PRE_SPAWN_PROOF_RUNS {
+            let marker = directory.join(format!("cancelled-{attempt}"));
+            let mut request = marker_request(MARKER_SCRIPT, &marker);
+            request.command.input = Input::Bytes(UNREAD_SMALL_INPUT.to_vec());
+
+            let output = run_with_cancellation(request, &cancellation)
+                .expect("pre-spawn cancellation is a bounded observation");
+
+            assert!(!marker.exists(), "attempt {attempt} started a child");
+            assert_eq!(output, expected);
+        }
+        let control_marker = directory.join("control");
+        let control = run_with_cancellation(
+            marker_request(MARKER_SCRIPT, &control_marker),
+            &AtomicBool::new(false),
+        )
+        .expect("control command runs");
+
+        assert!(control_marker.exists(), "control must start a child");
+        assert_eq!(control.disposition, Disposition::Succeeded);
+        std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+    }
+
+    // r[verify bounded_exec.cancellation.pre_spawn]
+    #[test]
+    fn invalid_requests_keep_their_errors_when_cancellation_is_raised() {
+        let cancellation = AtomicBool::new(true);
+        let mut empty_program = request("exit 0");
+        empty_program.command.program = PathBuf::new();
+        let mut oversized_input = request("exit 0");
+        oversized_input.limits.stdin_max_bytes = SMALL_OUTPUT_MAX_BYTES;
+        oversized_input.command.input = Input::Bytes(vec![0_u8; SMALL_OUTPUT_MAX_BYTES + 1]);
+        let mut unpreparable_capture = request("exit 0");
+        unpreparable_capture.limits.stdout_max_bytes = usize::MAX;
+
+        assert!(matches!(
+            run_with_cancellation(empty_program, &cancellation),
+            Err(RunError::EmptyProgram)
+        ));
+        assert!(matches!(
+            run_with_cancellation(oversized_input, &cancellation),
+            Err(RunError::InputLimitExceeded)
+        ));
+        assert!(matches!(
+            run_with_cancellation(unpreparable_capture, &cancellation),
+            Err(RunError::CapturePreparation {
+                worker: Worker::Stdout,
+                ..
+            })
+        ));
+    }
+
+    // r[verify bounded_exec.cancellation.post_spawn]
+    // r[verify bounded_exec.cancellation.verification]
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_after_spawn_tears_down_and_reports_the_reaped_signal() {
+        let directory = scratch_directory("post-spawn");
+        let marker = directory.join("started");
+        let mut request = marker_request(
+            &format!("{MARKER_SCRIPT}; {NON_TERMINATING_SHELL_LOOP}"),
+            &marker,
+        );
+        request.limits.timeout_ms = LONG_TIMEOUT_MS;
+        request.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+        request.command.input = Input::Bytes(pipe_exceeding_input());
+        let cancellation = AtomicBool::new(false);
+
+        let output = thread::scope(|scope| {
+            scope.spawn(|| {
+                let started = Instant::now();
+                while !marker.exists() && started.elapsed() < Duration::from_millis(LONG_TIMEOUT_MS)
+                {
+                    thread::sleep(Duration::from_millis(MARKER_WAIT_POLL_MS));
+                }
+                cancellation.store(true, Ordering::Release);
+            });
+            run_with_cancellation(request, &cancellation)
+        })
+        .expect("cancellation after spawn is a bounded observation");
+
+        assert!(marker.exists(), "the child must have started");
+        assert_eq!(output.completion, Completion::Cancelled);
+        assert_eq!(output.disposition, Disposition::Cancelled);
+        assert_eq!(output.exit_code, None);
+        assert_eq!(
+            output.signal,
+            Some(nix::sys::signal::Signal::SIGKILL as i32)
+        );
+        assert_eq!(output.input.status, InputStatus::ReaderClosed);
+        assert_piped_delivery_consistent(output.input, PIPE_EXCEEDING_INPUT_BYTES);
+        std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+    }
+
+    // r[verify bounded_exec.input_delivery.reader_closed]
+    // r[verify bounded_exec.input_delivery.verification]
+    #[cfg(unix)]
+    #[test]
+    fn unread_input_never_fails_an_exited_run_in_sequence() {
+        let large_input = pipe_exceeding_input();
+
+        for _ in 0..SEQUENTIAL_UNREAD_RUNS {
+            assert_unread_input_succeeds(UNREAD_SMALL_INPUT);
+            let large = assert_unread_input_succeeds(&large_input);
+            assert_eq!(large.status, InputStatus::ReaderClosed);
+        }
+    }
+
+    // r[verify bounded_exec.input_delivery.reader_closed]
+    // r[verify bounded_exec.input_delivery.verification]
+    #[cfg(unix)]
+    #[test]
+    fn unread_input_never_fails_an_exited_run_under_parallel_load() {
+        let large_input = pipe_exceeding_input();
+
+        thread::scope(|scope| {
+            for _ in 0..PARALLEL_UNREAD_WORKERS {
+                scope.spawn(|| {
+                    for _ in 0..PARALLEL_UNREAD_RUNS_PER_WORKER {
+                        assert_unread_input_succeeds(UNREAD_SMALL_INPUT);
+                        let large = assert_unread_input_succeeds(&large_input);
+                        assert_eq!(large.status, InputStatus::ReaderClosed);
+                    }
+                });
+            }
+        });
+    }
+
+    // r[verify bounded_exec.input_delivery.fact]
+    // r[verify bounded_exec.input_delivery.verification]
+    #[cfg(unix)]
+    #[test]
+    fn child_that_reads_all_input_reports_every_byte_written() {
+        let input = READ_TO_END_LINE.repeat(READ_TO_END_LINES);
+        let mut request = request("while IFS= read -r line; do :; done; printf drained");
+        request.limits.timeout_ms = LONG_TIMEOUT_MS;
+        request.limits.stdin_max_bytes = input.len();
+        request.command.input = Input::Bytes(input.clone());
+
+        let output = run(request).expect("read-to-end command succeeds");
+
+        assert_eq!(output.disposition, Disposition::Succeeded);
+        assert_eq!(output.stdout.bytes, b"drained");
+        assert_eq!(
+            output.input,
+            InputDelivery {
+                offered_bytes: input.len(),
+                written_bytes: input.len(),
+                status: InputStatus::AllWritten,
+            }
+        );
+    }
+
+    /// Pollable writer that accepts a prefix, then returns a chosen fault.
+    /// `None` models a zero-byte write.
+    #[cfg(unix)]
+    struct FaultyPipe {
+        stream: std::os::unix::net::UnixStream,
+        accept_before_fault: usize,
+        accepted: usize,
+        fault: Option<io::ErrorKind>,
+    }
+
+    #[cfg(unix)]
+    impl std::os::fd::AsFd for FaultyPipe {
+        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+            self.stream.as_fd()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Write for FaultyPipe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let open = self.accept_before_fault - self.accepted;
+            if open > 0 {
+                let accepted = bytes.len().min(open);
+                self.accepted += accepted;
+                return Ok(accepted);
+            }
+            self.fault.map_or(Ok(0), |kind| Err(io::Error::from(kind)))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_through_fault(fault: Option<io::ErrorKind>) -> Result<InputDelivery, RunError> {
+        let (stream, _peer) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair must open");
+        let pipe = FaultyPipe {
+            stream,
+            accept_before_fault: FAULT_ACCEPTED_BYTES,
+            accepted: 0,
+            fault,
+        };
+        write_stdin(
+            pipe,
+            &[INPUT_FILL_BYTE; FAULT_INPUT_BYTES],
+            &AtomicBool::new(false),
+            Duration::from_millis(TEST_POLL_INTERVAL_MS),
+        )
+    }
+
+    // r[verify bounded_exec.input_delivery.reader_closed]
+    // r[verify bounded_exec.input_delivery.write_errors]
+    #[cfg(unix)]
+    #[test]
+    fn only_reader_closure_errors_end_delivery_without_failing() {
+        const READER_CLOSURE: [io::ErrorKind; 3] = [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+        ];
+        const OTHER_FAULTS: [io::ErrorKind; 4] = [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::OutOfMemory,
+            io::ErrorKind::Other,
+        ];
+
+        for kind in READER_CLOSURE {
+            assert_eq!(
+                write_through_fault(Some(kind)).expect("reader closure is a delivery fact"),
+                InputDelivery {
+                    offered_bytes: FAULT_INPUT_BYTES,
+                    written_bytes: FAULT_ACCEPTED_BYTES,
+                    status: InputStatus::ReaderClosed,
+                }
+            );
+        }
+        for kind in OTHER_FAULTS {
+            let result = write_through_fault(Some(kind));
+            assert!(
+                matches!(
+                    &result,
+                    Err(RunError::Io {
+                        operation: Operation::WriteStdin,
+                        error,
+                    }) if error.kind() == kind
+                ),
+                "{kind:?} must fail the writer, got {result:?}"
+            );
+        }
+        assert!(matches!(
+            write_through_fault(None),
+            Err(RunError::Io {
+                operation: Operation::WriteStdin,
+                error,
+            }) if error.kind() == io::ErrorKind::WriteZero
+        ));
+    }
+
+    // r[verify bounded_exec.input_delivery.write_errors]
+    #[cfg(unix)]
+    #[test]
+    fn stopped_stdin_writer_still_fails_while_the_reader_stays_open() {
+        let (writer, _held_reader) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair must open");
+        let input = pipe_exceeding_input();
+        let stop = AtomicBool::new(false);
+
+        let result = thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                write_stdin(
+                    writer,
+                    &input,
+                    &stop,
+                    Duration::from_millis(TEST_POLL_INTERVAL_MS),
+                )
+            });
+            thread::sleep(Duration::from_millis(STOP_WRITER_AFTER_MS));
+            stop.store(true, Ordering::Release);
+            handle.join().expect("writer must not panic")
+        });
+
+        assert!(matches!(
+            result,
+            Err(RunError::WorkerTeardownTimedOut(Worker::Stdin))
+        ));
+    }
+
+    // r[verify bounded_exec.input_delivery.verification]
+    #[cfg(unix)]
+    #[test]
+    fn timeout_with_unread_input_still_reports_reader_closure() {
+        let mut request = request(NON_TERMINATING_SHELL_LOOP);
+        request.limits.timeout_ms = SHORT_TIMEOUT_MS;
+        request.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+        request.command.input = Input::Bytes(pipe_exceeding_input());
+
+        let output = run(request).expect("timeout with unread input is an observation");
+
+        assert_eq!(output.completion, Completion::TimedOut);
+        assert_eq!(output.disposition, Disposition::TimedOut);
+        assert_eq!(output.input.status, InputStatus::ReaderClosed);
+        assert_piped_delivery_consistent(output.input, PIPE_EXCEEDING_INPUT_BYTES);
+    }
+
+    // r[verify bounded_exec.input_delivery.verification]
+    #[cfg(unix)]
+    #[test]
+    fn output_limit_disposition_is_independent_of_input_delivery() {
+        let mut unread = request("printf 'bounded-output'");
+        unread.limits.stdout_max_bytes = SMALL_OUTPUT_MAX_BYTES;
+        unread.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+        unread.command.input = Input::Bytes(pipe_exceeding_input());
+        let mut echoing = request("while IFS= read -r line; do printf '%s\\n' \"$line\"; done");
+        echoing.limits.stdout_max_bytes = SMALL_OUTPUT_MAX_BYTES;
+        echoing.command.input = Input::Bytes(READ_TO_END_LINE.to_vec());
+
+        let unread = run(unread).expect("unread output flood is an observation");
+        let echoing = run(echoing).expect("echoed output flood is an observation");
+
+        assert_eq!(
+            unread.disposition,
+            Disposition::OutputLimitExceeded(OverflowedStreams::Stdout)
+        );
+        assert_eq!(unread.input.status, InputStatus::ReaderClosed);
+        assert_piped_delivery_consistent(unread.input, PIPE_EXCEEDING_INPUT_BYTES);
+        assert_eq!(
+            echoing.disposition,
+            Disposition::OutputLimitExceeded(OverflowedStreams::Stdout)
+        );
+        assert_eq!(
+            echoing.input,
+            InputDelivery {
+                offered_bytes: READ_TO_END_LINE.len(),
+                written_bytes: READ_TO_END_LINE.len(),
+                status: InputStatus::AllWritten,
+            }
+        );
     }
 }

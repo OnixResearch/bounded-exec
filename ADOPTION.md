@@ -9,6 +9,14 @@ The standalone test matrix covers the two first-wave consumer policies:
 
 A disposable migration against exact Mantle and Octet base revisions also passed both focused test suites and both consumer-focused Clippy rails. See [`PILOT.md`](PILOT.md) for commands, line reductions, retained consumer policy, and bounded caveats. These are pilot facts, not consumer release evidence.
 
+## Revision upgrade notes
+
+Revisions after `8f1ed852fde6e75f605bf8fc73bb1d472739feb9` change cancellation and input semantics. See the README's Cancellation and Input delivery sections.
+
+- `ExecutionOutput` has a new public field, `input: InputDelivery`. New public types `InputDelivery` and `InputStatus` describe it. Code that builds `ExecutionOutput` with a struct literal, or destructures it without `..`, must add the field. Field-access consumers need no change.
+- A cancellation flag raised before the call no longer starts a child. The cancelled result has `exit_code: None`, `signal: None`, and `InputStatus::NotStarted`. Consumer-side pre-spawn guards become redundant, and a consumer may remove them after adopting the revision.
+- Broken-pipe, connection-reset, and connection-aborted stdin errors no longer fail a run, including when the child exits on its own. They are reported as `InputStatus::ReaderClosed`. A consumer that treated those errors as unread-input detection must inspect `input` instead. Delivery facts do not prove consumption.
+
 ## Cutover gate
 
 The reviewed commit `29dac88ecded94457572db3fdfaaaab95fa91525` is now
