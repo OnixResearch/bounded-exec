@@ -13,9 +13,10 @@ A disposable migration against exact Mantle and Octet base revisions also passed
 
 Revisions after `8f1ed852fde6e75f605bf8fc73bb1d472739feb9` change cancellation and input semantics. See the README's Cancellation and Input delivery sections.
 
-- `ExecutionOutput` has a new public field, `input: InputDelivery`. New public types `InputDelivery` and `InputStatus` describe it. Code that builds `ExecutionOutput` with a struct literal, or destructures it without `..`, must add the field. Field-access consumers need no change.
+- `ExecutionOutput` has a new public field, `input: InputDelivery { offered_bytes, status }`. New public types `InputDelivery` and `InputStatus` (`NotStarted`, `NullDevice`, `Piped`) describe it. Code that builds `ExecutionOutput` with a struct literal, or destructures it without `..`, must add the field. Field-access consumers need no change.
 - A cancellation flag raised before the call no longer starts a child. The cancelled result has `exit_code: None`, `signal: None`, and `InputStatus::NotStarted`. Consumer-side pre-spawn guards become redundant, and a consumer may remove them after adopting the revision.
-- Broken-pipe, connection-reset, and connection-aborted stdin errors no longer fail a run, including when the child exits on its own. They are reported as `InputStatus::ReaderClosed`. A consumer that treated those errors as unread-input detection must inspect `input` instead. Delivery facts do not prove consumption.
+- Broken-pipe, connection-reset, and connection-aborted stdin errors no longer fail a run, including when the child exits on its own, and they leave no trace in the observation. A consumer that treated those errors as unread-input detection was observing scheduling, not consumption. Bounded Exec does not observe consumption; a consumer that needs it must obtain a child-side acknowledgement.
+- Revision `c33f1bd64999d0bb8b4a1d73399782efa847f424` briefly reported `InputDelivery::written_bytes` and the statuses `AllWritten` and `ReaderClosed`. Later revisions remove them, because they varied with writer scheduling for a child that does not read its input; `Piped` replaces both statuses.
 
 ## Cutover gate
 

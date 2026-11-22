@@ -118,7 +118,7 @@ pub struct ExecutionOutput {
     pub exit_code: Option<i32>,
     /// Unix termination signal, if one was available.
     pub signal: Option<i32>,
-    /// Bounded standard-input delivery facts.
+    /// Standard-input facts fixed by the request and child creation.
     pub input: InputDelivery,
     /// Bounded stdout capture.
     pub stdout: CapturedOutput,
@@ -128,35 +128,37 @@ pub struct ExecutionOutput {
     pub disposition: Disposition,
 }
 
-/// Standard-input delivery facts for one execution.
+/// Standard-input facts for one execution.
 ///
-/// Written bytes were accepted by the stdin pipe. They are not proof that the
-/// child read, parsed, or acted on any byte.
+/// Every fact is fixed by the request and by whether a child was created, so
+/// the same request and child behavior always produce the same facts. The
+/// runner does not report how many bytes the stdin pipe accepted, nor whether
+/// the child read any byte. When a child exits or is stopped without reading,
+/// the accepted-byte count depends on writer scheduling, and consumption is
+/// not observable from the writer side at all.
 // r[impl bounded_exec.input_delivery.fact]
 // r[impl bounded_exec.input_delivery.boundary]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InputDelivery {
     /// Bytes the caller supplied through [`Input::Bytes`]; zero for [`Input::Null`].
     pub offered_bytes: usize,
-    /// Bytes written into the stdin pipe, never more than `offered_bytes`.
-    pub written_bytes: usize,
-    /// How delivery ended.
+    /// How standard input was provided.
     pub status: InputStatus,
 }
 
-/// How standard-input delivery ended.
+/// How standard input was provided.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputStatus {
-    /// No child was created, so no byte was written.
+    /// No child was created, so no byte was offered to a child.
     NotStarted,
     /// Standard input was the null device; no byte was offered.
     NullDevice,
-    /// Every offered byte was written, then the runner closed the pipe.
-    AllWritten,
-    /// The read end closed before every offered byte was written, because
-    /// the child closed it, exited, or was terminated. This is a delivery
-    /// fact, not a run failure.
-    ReaderClosed,
+    /// The offered bytes were offered through a stdin pipe. Writing stopped
+    /// once every byte was written or the read end closed, and the runner
+    /// closed the pipe. Which of the two happened is not reported: for a
+    /// child that exits or is stopped without reading, it depends on
+    /// scheduling. Neither proves that the child read any byte.
+    Piped,
 }
 
 /// Worker associated with a runner error.
@@ -329,11 +331,7 @@ fn run_inner(
     let prepared_captures = prepare_captures(limits)?;
     // r[impl bounded_exec.cancellation.pre_spawn]
     if cancellation_requested(cancellation) {
-        let input = InputDelivery {
-            offered_bytes: offered_input_bytes(&command_spec.input),
-            written_bytes: 0,
-            status: InputStatus::NotStarted,
-        };
+        let input = input_delivery(&command_spec.input, ChildCreation::NotStarted);
         return Ok(observation(
             Completion::Cancelled,
             None,
@@ -357,6 +355,7 @@ fn run_inner(
     let stdout = take_required_stdout(&mut child, termination_scope, limits)?;
     let stderr = take_required_stderr(&mut child, termination_scope, limits)?;
     let poll_interval = Duration::from_millis(limits.poll_interval_ms);
+    let input = input_delivery(&command_spec.input, ChildCreation::Started);
     let stdin_worker = start_stdin_worker(stdin, command_spec.input, poll_interval);
     let stdout_worker = start_capture_worker(
         stdout,
@@ -378,17 +377,10 @@ fn run_inner(
         wait_for_completion(&mut child, termination_scope, limits, cancellation)?;
 
     let teardown_budget = TeardownBudget::new(limits.teardown_timeout_ms, limits.poll_interval_ms);
-    let input_result = match stdin_worker {
-        Some(worker) => finish_worker(worker, teardown_budget),
-        None => Ok(InputDelivery {
-            offered_bytes: 0,
-            written_bytes: 0,
-            status: InputStatus::NullDevice,
-        }),
-    };
+    let stdin_result = stdin_worker.map_or(Ok(()), |worker| finish_worker(worker, teardown_budget));
     let stdout_result = finish_worker(stdout_worker, teardown_budget);
     let stderr_result = finish_worker(stderr_worker, teardown_budget);
-    let input = input_result?;
+    stdin_result?;
     let stdout = stdout_result?;
     let stderr = stderr_result?;
     Ok(observation(
@@ -437,6 +429,29 @@ fn offered_input_bytes(input: &Input) -> usize {
     match input {
         Input::Null => 0,
         Input::Bytes(bytes) => bytes.len(),
+    }
+}
+
+/// Whether a child process was created for the run.
+#[derive(Clone, Copy)]
+enum ChildCreation {
+    NotStarted,
+    Started,
+}
+
+/// Derive input facts from the request and child creation only.
+///
+/// No writer progress enters the result, so it cannot vary with scheduling.
+// r[impl bounded_exec.input_delivery.fact]
+fn input_delivery(input: &Input, creation: ChildCreation) -> InputDelivery {
+    let status = match (creation, input) {
+        (ChildCreation::NotStarted, _) => InputStatus::NotStarted,
+        (ChildCreation::Started, Input::Null) => InputStatus::NullDevice,
+        (ChildCreation::Started, Input::Bytes(_)) => InputStatus::Piped,
+    };
+    InputDelivery {
+        offered_bytes: offered_input_bytes(input),
+        status,
     }
 }
 
@@ -668,7 +683,7 @@ fn start_stdin_worker(
     stdin: Option<std::process::ChildStdin>,
     input: Input,
     poll_interval: Duration,
-) -> Option<WorkerHandle<InputDelivery>> {
+) -> Option<WorkerHandle<()>> {
     let (Some(stdin), Input::Bytes(bytes)) = (stdin, input) else {
         return None;
     };
@@ -694,18 +709,13 @@ fn write_stdin<W>(
     bytes: &[u8],
     stop: &AtomicBool,
     poll_interval: Duration,
-) -> Result<InputDelivery, RunError>
+) -> Result<(), RunError>
 where
     W: Write + WorkerPipe,
 {
     let write_error = |error| RunError::Io {
         operation: Operation::WriteStdin,
         error,
-    };
-    let delivery = |remaining: &[u8], status| InputDelivery {
-        offered_bytes: bytes.len(),
-        written_bytes: bytes.len() - remaining.len(),
-        status,
     };
     let mut remaining = bytes;
     while !remaining.is_empty() {
@@ -721,14 +731,16 @@ where
             }
             Ok(written) => remaining = &remaining[written..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if is_reader_closure(&error) => {
-                return Ok(delivery(remaining, InputStatus::ReaderClosed));
-            }
+            // The read end closed because the child closed it, exited, or
+            // was stopped. Whether a child that never reads its input closes
+            // the pipe before or after the last byte is written depends on
+            // scheduling, so closure ends writing in every completion and
+            // leaves no trace in the observation.
+            Err(error) if is_reader_closure(&error) => return Ok(()),
             Err(error) => return Err(write_error(error)),
         }
     }
-    stdin.flush().map_err(write_error)?;
-    Ok(delivery(remaining, InputStatus::AllWritten))
+    stdin.flush().map_err(write_error)
 }
 
 /// Whether a stdin write error means every read end of the pipe is closed.
@@ -1061,17 +1073,20 @@ mod tests {
     const MARKER_WAIT_POLL_MS: u64 = 5;
     const PRE_SPAWN_PROOF_RUNS: usize = 256;
     const UNREAD_SMALL_INPUT: &[u8] = b"bounded\n";
-    /// Larger than any default pipe or socket buffer, so an unread write
-    /// cannot complete.
-    const PIPE_EXCEEDING_INPUT_BYTES: usize = 1 << 20;
+    /// 4 MiB: four times Linux's default `pipe-max-size` and 64 times its
+    /// default pipe buffer, so an unread write cannot complete and always
+    /// ends in reader closure.
+    const PIPE_EXCEEDING_INPUT_BYTES: usize = 4 << 20;
     const INPUT_FILL_BYTE: u8 = b'x';
     const READ_TO_END_LINE: &[u8] = b"bounded\n";
     /// 128 KiB of lines, twice the default Linux pipe buffer, so complete
     /// delivery requires the child to read.
     const READ_TO_END_LINES: usize = 16_384;
     const SEQUENTIAL_UNREAD_RUNS: usize = 64;
-    const PARALLEL_UNREAD_WORKERS: usize = 8;
-    const PARALLEL_UNREAD_RUNS_PER_WORKER: usize = 16;
+    /// More concurrent children than typical CI cores, so writers and
+    /// exiting children contend for scheduling.
+    const STRESS_WORKERS: usize = 16;
+    const STRESS_RUNS_PER_WORKER: usize = 32;
     const FAULT_INPUT_BYTES: usize = 4_096;
     const FAULT_ACCEPTED_BYTES: usize = 1_024;
     const STOP_WRITER_AFTER_MS: u64 = 50;
@@ -1127,27 +1142,54 @@ mod tests {
         }
     }
 
-    fn assert_piped_delivery_consistent(delivery: InputDelivery, offered_bytes: usize) {
-        assert_eq!(delivery.offered_bytes, offered_bytes);
-        match delivery.status {
-            InputStatus::AllWritten => assert_eq!(delivery.written_bytes, offered_bytes),
-            InputStatus::ReaderClosed => assert!(delivery.written_bytes < offered_bytes),
-            other => panic!("unexpected piped delivery status {other:?}"),
+    fn piped(offered_bytes: usize) -> InputDelivery {
+        InputDelivery {
+            offered_bytes,
+            status: InputStatus::Piped,
         }
     }
 
-    fn assert_unread_input_succeeds(input: &[u8]) -> InputDelivery {
+    fn immediate_exit_request(input: &[u8]) -> RunRequest {
         let mut request = request("exit 0");
         request.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
         request.command.input = Input::Bytes(input.to_vec());
+        request
+    }
 
-        let output = run(request).expect("unread input never fails a run");
+    /// The single observation every immediate-exit run must produce,
+    /// whatever the stdin writer's scheduling.
+    fn immediate_exit_outcome(offered_bytes: usize) -> ExecutionOutput {
+        ExecutionOutput {
+            completion: Completion::Exited,
+            exit_code: Some(SUCCESS_EXIT_CODE),
+            signal: None,
+            input: piped(offered_bytes),
+            stdout: empty_capture(),
+            stderr: empty_capture(),
+            disposition: Disposition::Succeeded,
+        }
+    }
 
-        assert_eq!(output.completion, Completion::Exited);
-        assert_eq!(output.exit_code, Some(SUCCESS_EXIT_CODE));
-        assert_eq!(output.disposition, Disposition::Succeeded);
-        assert_piped_delivery_consistent(output.input, input.len());
-        output.input
+    fn assert_immediate_exit_outcome(input: &[u8]) {
+        let output = run(immediate_exit_request(input)).expect("unread input never fails a run");
+
+        assert_eq!(output, immediate_exit_outcome(input.len()));
+    }
+
+    /// Whether one immediate-exit run leaked a stdin write error. Any other
+    /// difference from the expected observation fails the test directly.
+    fn immediate_exit_leaked_stdin_error(input: &[u8]) -> bool {
+        match run(immediate_exit_request(input)) {
+            Ok(output) => {
+                assert_eq!(output, immediate_exit_outcome(input.len()));
+                false
+            }
+            Err(RunError::Io {
+                operation: Operation::WriteStdin,
+                ..
+            }) => true,
+            Err(error) => panic!("unexpected run error {error:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -1168,14 +1210,7 @@ mod tests {
         assert_eq!(output.stdout.bytes, b"bounded:input");
         assert_eq!(output.stdout.observed_bytes, output.stdout.bytes.len());
         assert!(!output.stdout.truncated);
-        assert_eq!(
-            output.input,
-            InputDelivery {
-                offered_bytes: b"input\n".len(),
-                written_bytes: b"input\n".len(),
-                status: InputStatus::AllWritten,
-            }
-        );
+        assert_eq!(output.input, piped(b"input\n".len()));
     }
 
     #[cfg(unix)]
@@ -1369,7 +1404,6 @@ mod tests {
             output.input,
             InputDelivery {
                 offered_bytes: 0,
-                written_bytes: 0,
                 status: InputStatus::NullDevice,
             }
         );
@@ -1388,7 +1422,6 @@ mod tests {
             signal: None,
             input: InputDelivery {
                 offered_bytes: UNREAD_SMALL_INPUT.len(),
-                written_bytes: 0,
                 status: InputStatus::NotStarted,
             },
             stdout: empty_capture(),
@@ -1485,8 +1518,7 @@ mod tests {
             output.signal,
             Some(nix::sys::signal::Signal::SIGKILL as i32)
         );
-        assert_eq!(output.input.status, InputStatus::ReaderClosed);
-        assert_piped_delivery_consistent(output.input, PIPE_EXCEEDING_INPUT_BYTES);
+        assert_eq!(output.input, piped(PIPE_EXCEEDING_INPUT_BYTES));
         std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
     }
 
@@ -1494,13 +1526,41 @@ mod tests {
     // r[verify bounded_exec.input_delivery.verification]
     #[cfg(unix)]
     #[test]
-    fn unread_input_never_fails_an_exited_run_in_sequence() {
+    fn immediate_exit_with_pipe_exceeding_input_succeeds() {
+        assert_immediate_exit_outcome(&pipe_exceeding_input());
+    }
+
+    // r[verify bounded_exec.input_delivery.reader_closed]
+    // r[verify bounded_exec.input_delivery.verification]
+    #[cfg(unix)]
+    #[test]
+    fn immediate_exit_with_small_input_matches_the_large_input_outcome() {
+        let large = run(immediate_exit_request(&pipe_exceeding_input()))
+            .expect("unread large input never fails a run");
+        let small = run(immediate_exit_request(UNREAD_SMALL_INPUT))
+            .expect("unread small input never fails a run");
+
+        assert_eq!(small, immediate_exit_outcome(UNREAD_SMALL_INPUT.len()));
+        assert_eq!(
+            ExecutionOutput {
+                input: small.input,
+                ..large
+            },
+            small,
+            "only the declared input size may differ"
+        );
+    }
+
+    // r[verify bounded_exec.input_delivery.reader_closed]
+    // r[verify bounded_exec.input_delivery.verification]
+    #[cfg(unix)]
+    #[test]
+    fn immediate_exit_outcome_is_identical_in_sequence() {
         let large_input = pipe_exceeding_input();
 
         for _ in 0..SEQUENTIAL_UNREAD_RUNS {
-            assert_unread_input_succeeds(UNREAD_SMALL_INPUT);
-            let large = assert_unread_input_succeeds(&large_input);
-            assert_eq!(large.status, InputStatus::ReaderClosed);
+            assert_immediate_exit_outcome(UNREAD_SMALL_INPUT);
+            assert_immediate_exit_outcome(&large_input);
         }
     }
 
@@ -1508,27 +1568,44 @@ mod tests {
     // r[verify bounded_exec.input_delivery.verification]
     #[cfg(unix)]
     #[test]
-    fn unread_input_never_fails_an_exited_run_under_parallel_load() {
+    fn immediate_exit_outcome_is_identical_under_parallel_load() {
         let large_input = pipe_exceeding_input();
 
-        thread::scope(|scope| {
-            for _ in 0..PARALLEL_UNREAD_WORKERS {
-                scope.spawn(|| {
-                    for _ in 0..PARALLEL_UNREAD_RUNS_PER_WORKER {
-                        assert_unread_input_succeeds(UNREAD_SMALL_INPUT);
-                        let large = assert_unread_input_succeeds(&large_input);
-                        assert_eq!(large.status, InputStatus::ReaderClosed);
-                    }
-                });
-            }
+        let (small_leaks, large_leaks) = thread::scope(|scope| {
+            let workers: Vec<_> = (0..STRESS_WORKERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut leaks = (0_usize, 0_usize);
+                        for _ in 0..STRESS_RUNS_PER_WORKER {
+                            leaks.0 +=
+                                usize::from(immediate_exit_leaked_stdin_error(UNREAD_SMALL_INPUT));
+                            leaks.1 += usize::from(immediate_exit_leaked_stdin_error(&large_input));
+                        }
+                        leaks
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("stress worker must not panic"))
+                .fold((0, 0), |total, leaks| {
+                    (total.0 + leaks.0, total.1 + leaks.1)
+                })
         });
+
+        assert_eq!(
+            (small_leaks, large_leaks),
+            (0, 0),
+            "leaked WriteStdin errors (small, large) over {} runs each",
+            STRESS_WORKERS * STRESS_RUNS_PER_WORKER
+        );
     }
 
     // r[verify bounded_exec.input_delivery.fact]
     // r[verify bounded_exec.input_delivery.verification]
     #[cfg(unix)]
     #[test]
-    fn child_that_reads_all_input_reports_every_byte_written() {
+    fn child_that_reads_all_input_reports_the_piped_fact() {
         let input = READ_TO_END_LINE.repeat(READ_TO_END_LINES);
         let mut request = request("while IFS= read -r line; do :; done; printf drained");
         request.limits.timeout_ms = LONG_TIMEOUT_MS;
@@ -1539,14 +1616,7 @@ mod tests {
 
         assert_eq!(output.disposition, Disposition::Succeeded);
         assert_eq!(output.stdout.bytes, b"drained");
-        assert_eq!(
-            output.input,
-            InputDelivery {
-                offered_bytes: input.len(),
-                written_bytes: input.len(),
-                status: InputStatus::AllWritten,
-            }
-        );
+        assert_eq!(output.input, piped(input.len()));
     }
 
     /// Pollable writer that accepts a prefix, then returns a chosen fault.
@@ -1584,7 +1654,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn write_through_fault(fault: Option<io::ErrorKind>) -> Result<InputDelivery, RunError> {
+    fn write_through_fault(fault: Option<io::ErrorKind>) -> Result<(), RunError> {
         let (stream, _peer) =
             std::os::unix::net::UnixStream::pair().expect("socket pair must open");
         let pipe = FaultyPipe {
@@ -1605,7 +1675,7 @@ mod tests {
     // r[verify bounded_exec.input_delivery.write_errors]
     #[cfg(unix)]
     #[test]
-    fn only_reader_closure_errors_end_delivery_without_failing() {
+    fn only_reader_closure_errors_end_writing_without_failing() {
         const READER_CLOSURE: [io::ErrorKind; 3] = [
             io::ErrorKind::BrokenPipe,
             io::ErrorKind::ConnectionReset,
@@ -1619,13 +1689,9 @@ mod tests {
         ];
 
         for kind in READER_CLOSURE {
-            assert_eq!(
-                write_through_fault(Some(kind)).expect("reader closure is a delivery fact"),
-                InputDelivery {
-                    offered_bytes: FAULT_INPUT_BYTES,
-                    written_bytes: FAULT_ACCEPTED_BYTES,
-                    status: InputStatus::ReaderClosed,
-                }
+            assert!(
+                matches!(write_through_fault(Some(kind)), Ok(())),
+                "{kind:?} must end writing without failing"
             );
         }
         for kind in OTHER_FAULTS {
@@ -1682,7 +1748,7 @@ mod tests {
     // r[verify bounded_exec.input_delivery.verification]
     #[cfg(unix)]
     #[test]
-    fn timeout_with_unread_input_still_reports_reader_closure() {
+    fn timeout_with_unread_input_reports_the_piped_fact() {
         let mut request = request(NON_TERMINATING_SHELL_LOOP);
         request.limits.timeout_ms = SHORT_TIMEOUT_MS;
         request.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
@@ -1692,8 +1758,7 @@ mod tests {
 
         assert_eq!(output.completion, Completion::TimedOut);
         assert_eq!(output.disposition, Disposition::TimedOut);
-        assert_eq!(output.input.status, InputStatus::ReaderClosed);
-        assert_piped_delivery_consistent(output.input, PIPE_EXCEEDING_INPUT_BYTES);
+        assert_eq!(output.input, piped(PIPE_EXCEEDING_INPUT_BYTES));
     }
 
     // r[verify bounded_exec.input_delivery.verification]
@@ -1715,19 +1780,11 @@ mod tests {
             unread.disposition,
             Disposition::OutputLimitExceeded(OverflowedStreams::Stdout)
         );
-        assert_eq!(unread.input.status, InputStatus::ReaderClosed);
-        assert_piped_delivery_consistent(unread.input, PIPE_EXCEEDING_INPUT_BYTES);
+        assert_eq!(unread.input, piped(PIPE_EXCEEDING_INPUT_BYTES));
         assert_eq!(
             echoing.disposition,
             Disposition::OutputLimitExceeded(OverflowedStreams::Stdout)
         );
-        assert_eq!(
-            echoing.input,
-            InputDelivery {
-                offered_bytes: READ_TO_END_LINE.len(),
-                written_bytes: READ_TO_END_LINE.len(),
-                status: InputStatus::AllWritten,
-            }
-        );
+        assert_eq!(echoing.input, piped(READ_TO_END_LINE.len()));
     }
 }

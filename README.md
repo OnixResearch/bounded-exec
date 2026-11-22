@@ -106,16 +106,17 @@ If the flag is raised after spawn, the poll loop tears down the owned processes,
 <!-- r[impl bounded_exec.input_delivery.reader_closed] -->
 <!-- r[impl bounded_exec.input_delivery.boundary] -->
 
-`ExecutionOutput::input` reports `offered_bytes`, `written_bytes`, and an `InputStatus`:
+`ExecutionOutput::input` reports `offered_bytes` and an `InputStatus`:
 
 - `NotStarted`: no child was created.
 - `NullDevice`: input was `Input::Null`.
-- `AllWritten`: every offered byte was written, then the runner closed the pipe.
-- `ReaderClosed`: the read end closed before every offered byte was written.
+- `Piped`: the offered bytes were offered through a stdin pipe, which the runner closed.
 
-A child may exit, close stdin, or be stopped without reading its input. The writer then sees broken pipe, connection reset, or connection aborted, and records `ReaderClosed`. That is never a run failure in any completion. The run is classified only by completion, exit code, and output policy. Other stdin write errors, zero-byte writes, and writers stopped by teardown still fail with their typed errors.
+Both facts are fixed by the request and by whether a child was created. The same request and child behavior always produce the same observation, however the stdin writer is scheduled.
 
-Written bytes were accepted by the pipe. They do not prove that the child read, parsed, or acted on them. With small input and a child that exits without reading, either `AllWritten` or `ReaderClosed` can occur, depending on scheduling. Consumers that need proof of consumption must obtain it from the child's own output or protocol.
+A child may exit, close stdin, or be stopped without reading its input. The writer may then see broken pipe, connection reset, or connection aborted. Whether it does depends on scheduling: small input can fit in the pipe buffer before the child exits, while input larger than the buffer always meets the closed pipe. Reader closure therefore ends writing without failing the run in every completion, including a normal exit, and leaves no trace in the observation. The run is classified only by completion, exit code, and output policy. Other stdin write errors, zero-byte writes, and writers stopped by teardown still fail with their typed errors.
+
+Bounded Exec does not observe stdin consumption. It does not report how many bytes the pipe accepted, because that count depends on scheduling, and even fully written input may sit unread in the pipe buffer. `Piped` does not prove that the child read, parsed, or acted on any byte. A consumer that needs proof of consumption must obtain a child-side acknowledgement, such as a byte count or digest in the child's own output or protocol.
 
 ## Source publication
 
