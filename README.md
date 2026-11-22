@@ -141,9 +141,11 @@ nix flake check -L
 Positive coverage includes explicit environment/input round trips, accepted exits, read-to-end input delivery, and a spawn control. Negative coverage includes malformed requests, bounded output floods, deadlines, pre-spawn cancellation proven by marker files over repeated runs, cancellation after spawn, unread input repeated sequentially and under parallel load, injected non-closure stdin errors, stopped writers, and descendant-held pipe cleanup.
 
 See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence,
-[`ADOPTION.md`](ADOPTION.md) for the authoritative consumer cutover gate, and
+[`ADOPTION.md`](ADOPTION.md) for the authoritative consumer cutover gate,
 [`docs/radicle-publication.md`](docs/radicle-publication.md) for the accepted
-Radicle publication receipt.
+Radicle publication receipt, and
+[`docs/radicle-ci-drill.md`](docs/radicle-ci-drill.md) for the boundary between
+patch CI and canonical admission.
 
 ## License
 
