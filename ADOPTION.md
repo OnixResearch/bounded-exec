@@ -20,11 +20,15 @@ Revisions after `8f1ed852fde6e75f605bf8fc73bb1d472739feb9` change cancellation a
 
 ## Cutover gate
 
-The reviewed commit `29dac88ecded94457572db3fdfaaaab95fa91525` is now
-published as canonical Radicle project
-`rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo` through the read-only HTTPS adapter
-`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`. The accepted
-publication receipt is documented in
+The reviewed commit `29dac88ecded94457572db3fdfaaaab95fa91525` was published
+as Radicle project `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo` through the read-only
+HTTPS adapter `https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`.
+That identity is now frozen because two of its three delegate keys are lost.
+It stays served read-only for consumers pinned to that commit.
+
+The canonical identity is now `rad:zG25DRmacxYQcXzZmLKj8tmgYbEG`. Later
+revisions become admitted consumer sources only after that RID's seed and
+adapter admission and its publication receipt are accepted. See
 [`docs/radicle-publication.md`](docs/radicle-publication.md). Maintained
 consumers must not use an ambient `../bounded-exec` path or configure an
 automatic GitHub fallback.

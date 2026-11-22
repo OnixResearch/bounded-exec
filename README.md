@@ -120,11 +120,15 @@ Bounded Exec does not observe stdin consumption. It does not report how many byt
 
 ## Source publication
 
-The canonical Radicle project is `rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo`. The
-reviewed pilot source is the exact Git object
-`29dac88ecded94457572db3fdfaaaab95fa91525`, available read-only at
-`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git`. GitHub is a
-transition mirror, not an admitted dependency fallback.
+The canonical Radicle project is `rad:zG25DRmacxYQcXzZmLKj8tmgYbEG`. Its
+read-only HTTPS adapter, `https://git.onix.computer/zG25DRmacxYQcXzZmLKj8tmgYbEG.git`,
+and seed admission are pending. The previous identity,
+`rad:z2CpqLFpdP36fZXYUK5ZNWxMibpCo`, is frozen at canonical `main`
+`10e2ac43ca27f1dcadbe67a654cd185f60c0c3d3` because two of its three delegate
+keys are lost. It stays served read-only at
+`https://git.onix.computer/z2CpqLFpdP36fZXYUK5ZNWxMibpCo.git` for consumers
+pinned to the reviewed pilot source `29dac88ecded94457572db3fdfaaaab95fa91525`.
+GitHub is a transition mirror, not an admitted dependency fallback.
 
 See [`docs/radicle-publication.md`](docs/radicle-publication.md) for clone,
 exact-revision consumption, outage, rollback, evidence, and non-claim details.
