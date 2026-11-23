@@ -118,6 +118,17 @@ A child may exit, close stdin, or be stopped without reading its input. The writ
 
 Bounded Exec does not observe stdin consumption. It does not report how many bytes the pipe accepted, because that count depends on scheduling, and even fully written input may sit unread in the pipe buffer. `Piped` does not prove that the child read, parsed, or acted on any byte. A consumer that needs proof of consumption must obtain a child-side acknowledgement, such as a byte count or digest in the child's own output or protocol.
 
+## Fallible worker startup and owned teardown
+
+<!-- r[impl bounded_exec.worker_startup.fallible] -->
+<!-- r[impl bounded_exec.worker_startup.cleanup] -->
+<!-- r[impl bounded_exec.worker_startup.unwind] -->
+<!-- r[impl bounded_exec.worker_startup.boundary] -->
+
+Immediately after `Command::spawn()` succeeds, the shell takes armed ownership of the child, its termination scope, its pipes, and every started I/O worker. Stdin, stdout, and stderr workers are created through fallible `std::thread::Builder::spawn` calls rather than panicking `std::thread::spawn`.
+
+If worker creation fails at any position, the shell closes unused pipes, terminates and reaps the child according to its termination scope before waiting on already-started workers, and finishes those workers under one shared teardown budget. It returns `RunError::WorkerStart`, identifying the failed worker, preserving the original OS `io::Error` (and exposing it through `std::error::Error::source()`), and recording any child or worker teardown failures in `cleanup_errors` when cleanup cannot establish complete teardown (for example, when a descendant outside the terminated scope retains pipes). A non-panicking `Drop` guard provides the same cleanup on unexpected unwinding before ownership transfers to active execution. Scope-exit cleanup cannot run under process abort, `SIGKILL`, or a failing destructor.
+
 ## Source publication
 
 The canonical Radicle project is `rad:zG25DRmacxYQcXzZmLKj8tmgYbEG`. Its
@@ -143,7 +154,7 @@ nix develop -c cargo check -p bounded-exec-core --target wasm32-unknown-unknown
 nix flake check -L
 ```
 
-Positive coverage includes explicit environment/input round trips, accepted exits, read-to-end input delivery, and a spawn control. Negative coverage includes malformed requests, bounded output floods, deadlines, pre-spawn cancellation proven by marker files over repeated runs, cancellation after spawn, unread input repeated sequentially and under parallel load, injected non-closure stdin errors, stopped writers, and descendant-held pipe cleanup.
+Positive coverage includes explicit environment/input round trips, accepted exits, read-to-end input delivery, and a spawn control. Negative coverage includes malformed requests, bounded output floods, deadlines, pre-spawn cancellation proven by marker files over repeated runs, cancellation after spawn, unread input repeated sequentially and under parallel load, injected non-closure stdin errors, stopped writers, descendant-held pipe cleanup, and injected I/O worker-startup failures and unwinds across stdin, stdout, and stderr positions.
 
 See [`PILOT.md`](PILOT.md) for the disposable two-consumer migration evidence,
 [`ADOPTION.md`](ADOPTION.md) for the authoritative consumer cutover gate,

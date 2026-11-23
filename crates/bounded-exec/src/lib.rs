@@ -219,6 +219,16 @@ pub enum RunError {
     },
     /// A configured pipe was unexpectedly unavailable.
     MissingPipe(Worker),
+    /// Starting an I/O worker thread failed after spawning the child.
+    WorkerStart {
+        /// Worker whose thread could not be created.
+        worker: Worker,
+        /// Operating-system thread-creation error.
+        error: io::Error,
+        /// Cleanup failures observed while tearing down the child and any
+        /// already-started workers under the shared teardown budget.
+        cleanup_errors: Vec<RunError>,
+    },
     /// An operating-system operation failed.
     Io {
         /// Failed operation.
@@ -262,6 +272,21 @@ impl fmt::Display for RunError {
                 error.requested_capacity()
             ),
             Self::MissingPipe(worker) => write!(formatter, "{worker:?} pipe is unavailable"),
+            Self::WorkerStart {
+                worker,
+                error,
+                cleanup_errors,
+            } => {
+                if cleanup_errors.is_empty() {
+                    write!(formatter, "{worker:?} worker startup failed: {error}")
+                } else {
+                    write!(
+                        formatter,
+                        "{worker:?} worker startup failed: {error} (cleanup also recorded {} error(s))",
+                        cleanup_errors.len()
+                    )
+                }
+            }
             Self::Io { operation, error } => write!(formatter, "{operation:?} failed: {error}"),
             Self::CaptureCountOverflow(worker) => {
                 write!(formatter, "{worker:?} byte count overflowed")
@@ -282,7 +307,7 @@ impl fmt::Display for RunError {
 impl std::error::Error for RunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io { error, .. } => Some(error),
+            Self::Io { error, .. } | Self::WorkerStart { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -321,6 +346,14 @@ fn run_inner(
     request: RunRequest,
     cancellation: Option<&AtomicBool>,
 ) -> Result<ExecutionOutput, RunError> {
+    run_with_spawner(request, cancellation, &mut OsWorkerSpawner)
+}
+
+fn run_with_spawner<S: WorkerSpawner>(
+    request: RunRequest,
+    cancellation: Option<&AtomicBool>,
+    spawner: &mut S,
+) -> Result<ExecutionOutput, RunError> {
     validate_request(&request)?;
     let RunRequest {
         command: command_spec,
@@ -342,39 +375,49 @@ fn run_inner(
         ));
     }
     let mut command = prepare_command(&command_spec, termination_scope);
-    let mut child = command.spawn().map_err(|error| RunError::Io {
+    let child = command.spawn().map_err(|error| RunError::Io {
         operation: Operation::Spawn,
         error,
     })?;
 
-    let stdin = if matches!(&command_spec.input, Input::Bytes(_)) {
-        Some(take_required_stdin(&mut child, termination_scope, limits)?)
-    } else {
-        None
-    };
-    let stdout = take_required_stdout(&mut child, termination_scope, limits)?;
-    let stderr = take_required_stderr(&mut child, termination_scope, limits)?;
+    // r[impl bounded_exec.worker_startup.fallible]
+    // r[impl bounded_exec.worker_startup.cleanup]
+    let mut startup = StartupGuard::new(child, termination_scope, limits);
+    if matches!(&command_spec.input, Input::Bytes(_)) {
+        startup.take_stdin()?;
+    }
+    startup.take_stdout()?;
+    startup.take_stderr()?;
+
     let poll_interval = Duration::from_millis(limits.poll_interval_ms);
     let input = input_delivery(&command_spec.input, ChildCreation::Started);
-    let stdin_worker = start_stdin_worker(stdin, command_spec.input, poll_interval);
-    let stdout_worker = start_capture_worker(
-        stdout,
-        prepared_captures.stdout,
-        Worker::Stdout,
-        poll_interval,
-    );
-    let stderr_worker = start_capture_worker(
-        stderr,
-        prepared_captures.stderr,
-        Worker::Stderr,
-        poll_interval,
-    );
+    startup.start_stdin_worker(command_spec.input, poll_interval, spawner)?;
+    startup.start_stdout_worker(prepared_captures.stdout, poll_interval, spawner)?;
+    startup.start_stderr_worker(prepared_captures.stderr, poll_interval, spawner)?;
+
+    let ActiveChild {
+        mut child,
+        stdin_worker,
+        stdout_worker,
+        stderr_worker,
+    } = startup.into_active();
 
     // Remaining process-group members are terminated inside
     // `wait_for_completion`, before the direct child is reaped, so the group
     // identifier cannot be recycled between exit and `killpg`.
     let (completion, exit_status) =
-        wait_for_completion(&mut child, termination_scope, limits, cancellation)?;
+        match wait_for_completion(&mut child, termination_scope, limits, cancellation) {
+            Ok(result) => result,
+            Err(error) => {
+                let teardown_budget =
+                    TeardownBudget::new(limits.teardown_timeout_ms, limits.poll_interval_ms);
+                let _stdin_cleanup =
+                    stdin_worker.map(|worker| finish_worker(worker, teardown_budget));
+                let _stdout_cleanup = finish_worker(stdout_worker, teardown_budget);
+                let _stderr_cleanup = finish_worker(stderr_worker, teardown_budget);
+                return Err(error);
+            }
+        };
 
     let teardown_budget = TeardownBudget::new(limits.teardown_timeout_ms, limits.poll_interval_ms);
     let stdin_result = stdin_worker.map_or(Ok(()), |worker| finish_worker(worker, teardown_budget));
@@ -643,58 +686,280 @@ fn wait_ready<P: WorkerPipe>(
     }
 }
 
-fn take_required_stdin(
-    child: &mut Child,
-    scope: TerminationScope,
-    limits: ExecutionLimits,
-) -> Result<std::process::ChildStdin, RunError> {
-    let Some(stdin) = child.stdin.take() else {
-        terminate_and_reap(child, scope, limits)?;
-        return Err(RunError::MissingPipe(Worker::Stdin));
-    };
-    Ok(stdin)
+trait WorkerSpawner {
+    fn spawn<F>(&mut self, worker: Worker, task: F) -> io::Result<thread::JoinHandle<()>>
+    where
+        F: FnOnce() + Send + 'static;
 }
 
-fn take_required_stdout(
-    child: &mut Child,
-    scope: TerminationScope,
-    limits: ExecutionLimits,
-) -> Result<std::process::ChildStdout, RunError> {
-    let Some(stdout) = child.stdout.take() else {
-        terminate_and_reap(child, scope, limits)?;
-        return Err(RunError::MissingPipe(Worker::Stdout));
-    };
-    Ok(stdout)
+struct OsWorkerSpawner;
+
+impl WorkerSpawner for OsWorkerSpawner {
+    // r[impl bounded_exec.worker_startup.fallible]
+    fn spawn<F>(&mut self, worker: Worker, task: F) -> io::Result<thread::JoinHandle<()>>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        thread::Builder::new()
+            .name(worker_thread_name(worker).to_owned())
+            .spawn(task)
+    }
 }
 
-fn take_required_stderr(
-    child: &mut Child,
-    scope: TerminationScope,
-    limits: ExecutionLimits,
-) -> Result<std::process::ChildStderr, RunError> {
-    let Some(stderr) = child.stderr.take() else {
-        terminate_and_reap(child, scope, limits)?;
-        return Err(RunError::MissingPipe(Worker::Stderr));
-    };
-    Ok(stderr)
+const fn worker_thread_name(worker: Worker) -> &'static str {
+    match worker {
+        Worker::Stdin => "bounded-exec-stdin",
+        Worker::Stdout => "bounded-exec-stdout",
+        Worker::Stderr => "bounded-exec-stderr",
+    }
 }
 
-fn start_stdin_worker(
-    stdin: Option<std::process::ChildStdin>,
-    input: Input,
+struct ActiveChild {
+    child: Child,
+    stdin_worker: Option<WorkerHandle<()>>,
+    stdout_worker: WorkerHandle<CapturedOutput>,
+    stderr_worker: WorkerHandle<CapturedOutput>,
+}
+
+/// Armed owner for a spawned child, its pipes, and its started I/O workers
+/// during the startup window before [`wait_for_completion`].
+///
+/// Ownership is transferred and the guard disarmed only through
+/// [`Self::into_active`]. On an ordinary fallible error, [`Self::teardown`]
+/// runs explicitly and returns every cleanup error so the caller can preserve
+/// both the startup failure and any uncertain teardown result. On unwinding,
+/// [`Drop`] executes the same non-panicking teardown.
+// r[impl bounded_exec.worker_startup.cleanup]
+// r[impl bounded_exec.worker_startup.unwind]
+struct StartupGuard {
+    child: Option<Child>,
+    scope: TerminationScope,
+    limits: ExecutionLimits,
+    stdin_pipe: Option<std::process::ChildStdin>,
+    stdout_pipe: Option<std::process::ChildStdout>,
+    stderr_pipe: Option<std::process::ChildStderr>,
+    stdin_worker: Option<WorkerHandle<()>>,
+    stdout_worker: Option<WorkerHandle<CapturedOutput>>,
+    stderr_worker: Option<WorkerHandle<CapturedOutput>>,
+}
+
+impl StartupGuard {
+    const fn new(child: Child, scope: TerminationScope, limits: ExecutionLimits) -> Self {
+        Self {
+            child: Some(child),
+            scope,
+            limits,
+            stdin_pipe: None,
+            stdout_pipe: None,
+            stderr_pipe: None,
+            stdin_worker: None,
+            stdout_worker: None,
+            stderr_worker: None,
+        }
+    }
+
+    fn take_stdin(&mut self) -> Result<(), RunError> {
+        let stdin = self.child.as_mut().and_then(|child| child.stdin.take());
+        let Some(stdin) = stdin else {
+            return Err(self.fail_missing_pipe(Worker::Stdin));
+        };
+        self.stdin_pipe = Some(stdin);
+        Ok(())
+    }
+
+    fn take_stdout(&mut self) -> Result<(), RunError> {
+        let stdout = self.child.as_mut().and_then(|child| child.stdout.take());
+        let Some(stdout) = stdout else {
+            return Err(self.fail_missing_pipe(Worker::Stdout));
+        };
+        self.stdout_pipe = Some(stdout);
+        Ok(())
+    }
+
+    fn take_stderr(&mut self) -> Result<(), RunError> {
+        let stderr = self.child.as_mut().and_then(|child| child.stderr.take());
+        let Some(stderr) = stderr else {
+            return Err(self.fail_missing_pipe(Worker::Stderr));
+        };
+        self.stderr_pipe = Some(stderr);
+        Ok(())
+    }
+
+    fn start_stdin_worker<S: WorkerSpawner>(
+        &mut self,
+        input: Input,
+        poll_interval: Duration,
+        spawner: &mut S,
+    ) -> Result<(), RunError> {
+        let (Some(stdin), Input::Bytes(bytes)) = (self.stdin_pipe.take(), input) else {
+            return Ok(());
+        };
+        match start_stdin_worker(stdin, bytes, poll_interval, spawner) {
+            Ok(worker) => {
+                self.stdin_worker = Some(worker);
+                Ok(())
+            }
+            Err(error) => Err(self.fail_worker_start(Worker::Stdin, error)),
+        }
+    }
+
+    fn start_stdout_worker<S: WorkerSpawner>(
+        &mut self,
+        capture: CaptureAccumulator,
+        poll_interval: Duration,
+        spawner: &mut S,
+    ) -> Result<(), RunError> {
+        let Some(stdout) = self.stdout_pipe.take() else {
+            return Err(self.fail_missing_pipe(Worker::Stdout));
+        };
+        match start_capture_worker(stdout, capture, Worker::Stdout, poll_interval, spawner) {
+            Ok(worker) => {
+                self.stdout_worker = Some(worker);
+                Ok(())
+            }
+            Err(error) => Err(self.fail_worker_start(Worker::Stdout, error)),
+        }
+    }
+
+    fn start_stderr_worker<S: WorkerSpawner>(
+        &mut self,
+        capture: CaptureAccumulator,
+        poll_interval: Duration,
+        spawner: &mut S,
+    ) -> Result<(), RunError> {
+        let Some(stderr) = self.stderr_pipe.take() else {
+            return Err(self.fail_missing_pipe(Worker::Stderr));
+        };
+        match start_capture_worker(stderr, capture, Worker::Stderr, poll_interval, spawner) {
+            Ok(worker) => {
+                self.stderr_worker = Some(worker);
+                Ok(())
+            }
+            Err(error) => Err(self.fail_worker_start(Worker::Stderr, error)),
+        }
+    }
+
+    fn into_active(mut self) -> ActiveChild {
+        let child = self
+            .child
+            .take()
+            .expect("active child must exist when disarming startup guard");
+        let stdin_worker = self.stdin_worker.take();
+        let stdout_worker = self
+            .stdout_worker
+            .take()
+            .expect("stdout worker must exist when disarming startup guard");
+        let stderr_worker = self
+            .stderr_worker
+            .take()
+            .expect("stderr worker must exist when disarming startup guard");
+        ActiveChild {
+            child,
+            stdin_worker,
+            stdout_worker,
+            stderr_worker,
+        }
+    }
+
+    fn fail_missing_pipe(&mut self, worker: Worker) -> RunError {
+        if let Some(cleanup_error) = self.teardown().into_iter().next() {
+            return cleanup_error;
+        }
+        RunError::MissingPipe(worker)
+    }
+
+    fn fail_worker_start(&mut self, worker: Worker, error: io::Error) -> RunError {
+        let cleanup_errors = self.teardown();
+        RunError::WorkerStart {
+            worker,
+            error,
+            cleanup_errors,
+        }
+    }
+
+    fn teardown(&mut self) -> Vec<RunError> {
+        // Close any unused pipes first so no parent descriptor keeps child I/O
+        // open during termination.
+        drop(self.stdin_pipe.take());
+        drop(self.stdout_pipe.take());
+        drop(self.stderr_pipe.take());
+        if let Some(child) = self.child.as_mut() {
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+        }
+
+        let child = self.child.take();
+        let stdin_worker = self.stdin_worker.take();
+        let stdout_worker = self.stdout_worker.take();
+        let stderr_worker = self.stderr_worker.take();
+        if child.is_none()
+            && stdin_worker.is_none()
+            && stdout_worker.is_none()
+            && stderr_worker.is_none()
+        {
+            return Vec::new();
+        }
+
+        let teardown_budget = TeardownBudget::new(
+            self.limits.teardown_timeout_ms,
+            self.limits.poll_interval_ms,
+        );
+        let mut cleanup_errors = Vec::new();
+
+        // Terminate and reap the owned process(es) before waiting on workers so
+        // blocked pipe I/O unblocks without deadlocking on the child.
+        if let Some(mut child) = child {
+            if let Err(error) = terminate_and_reap_with_budget(
+                &mut child,
+                self.scope,
+                self.limits.poll_interval_ms,
+                teardown_budget,
+            ) {
+                cleanup_errors.push(error);
+            }
+        }
+
+        if let Some(worker) = stdin_worker {
+            if let Err(error) = finish_worker(worker, teardown_budget) {
+                cleanup_errors.push(error);
+            }
+        }
+        if let Some(worker) = stdout_worker {
+            if let Err(error) = finish_worker(worker, teardown_budget) {
+                cleanup_errors.push(error);
+            }
+        }
+        if let Some(worker) = stderr_worker {
+            if let Err(error) = finish_worker(worker, teardown_budget) {
+                cleanup_errors.push(error);
+            }
+        }
+
+        cleanup_errors
+    }
+}
+
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        let _cleanup_errors = self.teardown();
+    }
+}
+
+fn start_stdin_worker<S: WorkerSpawner>(
+    stdin: std::process::ChildStdin,
+    bytes: Vec<u8>,
     poll_interval: Duration,
-) -> Option<WorkerHandle<()>> {
-    let (Some(stdin), Input::Bytes(bytes)) = (stdin, input) else {
-        return None;
-    };
+    spawner: &mut S,
+) -> io::Result<WorkerHandle<()>> {
     let (sender, receiver) = mpsc::sync_channel(WORKER_CHANNEL_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
-    let worker_thread = thread::spawn(move || {
+    let worker_thread = spawner.spawn(Worker::Stdin, move || {
         let result = write_stdin(stdin, &bytes, &worker_stop, poll_interval);
         let _send_result = sender.send(result);
-    });
-    Some(WorkerHandle {
+    })?;
+    Ok(WorkerHandle {
         worker: Worker::Stdin,
         receiver,
         thread: worker_thread,
@@ -764,28 +1029,31 @@ const fn stdin_chunk_bytes() -> usize {
 }
 
 // r[impl bounded_exec.capture_capacity.steady_state]
-fn start_capture_worker<R>(
+// r[impl bounded_exec.worker_startup.fallible]
+fn start_capture_worker<R, S>(
     reader: R,
     capture: CaptureAccumulator,
     worker: Worker,
     poll_interval: Duration,
-) -> WorkerHandle<CapturedOutput>
+    spawner: &mut S,
+) -> io::Result<WorkerHandle<CapturedOutput>>
 where
     R: Read + WorkerPipe + Send + 'static,
+    S: WorkerSpawner,
 {
     let (sender, receiver) = mpsc::sync_channel(WORKER_CHANNEL_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
-    let worker_thread = thread::spawn(move || {
+    let worker_thread = spawner.spawn(worker, move || {
         let result = read_bounded(reader, capture, worker, &worker_stop, poll_interval);
         let _send_result = sender.send(result);
-    });
-    WorkerHandle {
+    })?;
+    Ok(WorkerHandle {
         worker,
         receiver,
         thread: worker_thread,
         stop,
-    }
+    })
 }
 
 fn read_bounded<R>(
@@ -932,10 +1200,18 @@ fn terminate_and_reap(
     scope: TerminationScope,
     limits: ExecutionLimits,
 ) -> Result<Option<ExitStatus>, RunError> {
+    let teardown_budget = TeardownBudget::new(limits.teardown_timeout_ms, limits.poll_interval_ms);
+    terminate_and_reap_with_budget(child, scope, limits.poll_interval_ms, teardown_budget)
+}
+
+fn terminate_and_reap_with_budget(
+    child: &mut Child,
+    scope: TerminationScope,
+    poll_interval_ms: u64,
+    teardown_budget: TeardownBudget,
+) -> Result<Option<ExitStatus>, RunError> {
     terminate_owned(child, scope)?;
-    let started = Instant::now();
-    let timeout = Duration::from_millis(limits.teardown_timeout_ms);
-    let poll_interval = Duration::from_millis(limits.poll_interval_ms);
+    let poll_interval = Duration::from_millis(poll_interval_ms);
     loop {
         let status = child.try_wait().map_err(|error| RunError::Io {
             operation: Operation::Reap,
@@ -944,11 +1220,11 @@ fn terminate_and_reap(
         if status.is_some() {
             return Ok(status);
         }
-        let elapsed = started.elapsed();
-        if elapsed >= timeout {
+        let remaining = teardown_budget.remaining();
+        if remaining.is_zero() {
             return Err(RunError::ChildTeardownTimedOut);
         }
-        thread::sleep(poll_interval.min(timeout.saturating_sub(elapsed)));
+        thread::sleep(poll_interval.min(remaining));
     }
 }
 
@@ -1369,7 +1645,9 @@ mod tests {
             capture,
             Worker::Stdout,
             Duration::from_millis(TEST_POLL_INTERVAL_MS),
-        );
+            &mut OsWorkerSpawner,
+        )
+        .expect("capture worker thread must start");
         thread::sleep(Duration::from_millis(STOP_AFTER_MS));
         let started = Instant::now();
 
@@ -1786,5 +2064,479 @@ mod tests {
             Disposition::OutputLimitExceeded(OverflowedStreams::Stdout)
         );
         assert_eq!(echoing.input, piped(READ_TO_END_LINE.len()));
+    }
+
+    #[cfg(unix)]
+    mod worker_startup_tests {
+        use std::error::Error;
+        use std::path::Path;
+        use std::sync::atomic::AtomicUsize;
+
+        use nix::errno::Errno;
+        use nix::sys::signal::Signal;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        use super::*;
+
+        const SHORT_TEARDOWN_TIMEOUT_MS: u64 = 100;
+        const WORKER_SETTLE_MS: u64 = 25;
+        const PID_WAIT_TIMEOUT_MS: u64 = 2_000;
+
+        enum FaultBehavior {
+            IoError(io::ErrorKind),
+            Panic,
+        }
+
+        struct CountingFailSpawner {
+            fail_on: Worker,
+            behavior: FaultBehavior,
+            alive_workers: Arc<AtomicUsize>,
+            before_fail: Option<Box<dyn FnMut()>>,
+        }
+
+        impl CountingFailSpawner {
+            fn new(
+                fail_on: Worker,
+                behavior: FaultBehavior,
+                alive_workers: Arc<AtomicUsize>,
+                before_fail: Option<Box<dyn FnMut()>>,
+            ) -> Self {
+                Self {
+                    fail_on,
+                    behavior,
+                    alive_workers,
+                    before_fail,
+                }
+            }
+        }
+
+        impl WorkerSpawner for CountingFailSpawner {
+            fn spawn<F>(&mut self, worker: Worker, task: F) -> io::Result<thread::JoinHandle<()>>
+            where
+                F: FnOnce() + Send + 'static,
+            {
+                if worker == self.fail_on {
+                    if let Some(hook) = self.before_fail.as_mut() {
+                        hook();
+                    }
+                    return match self.behavior {
+                        FaultBehavior::IoError(kind) => {
+                            Err(io::Error::new(kind, "injected worker startup failure"))
+                        }
+                        FaultBehavior::Panic => panic!("injected worker startup unwind"),
+                    };
+                }
+                let alive = Arc::clone(&self.alive_workers);
+                alive.fetch_add(1, Ordering::AcqRel);
+                let result = OsWorkerSpawner.spawn(worker, move || {
+                    struct LiveWorkerGuard(Arc<AtomicUsize>);
+                    impl Drop for LiveWorkerGuard {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::AcqRel);
+                        }
+                    }
+                    let _live = LiveWorkerGuard(alive);
+                    task();
+                });
+                if result.is_err() {
+                    self.alive_workers.fetch_sub(1, Ordering::AcqRel);
+                }
+                result
+            }
+        }
+
+        struct ProcessCleanupGuard(Option<i32>);
+
+        impl Drop for ProcessCleanupGuard {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0.take() {
+                    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+                }
+            }
+        }
+
+        fn wait_for_pid_file(path: &Path) -> i32 {
+            let started = Instant::now();
+            let timeout = Duration::from_millis(PID_WAIT_TIMEOUT_MS);
+            loop {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    if content.ends_with('\n') {
+                        if let Ok(pid) = content.trim().parse::<i32>() {
+                            return pid;
+                        }
+                    }
+                }
+                assert!(
+                    started.elapsed() < timeout,
+                    "timed out waiting for PID file {}",
+                    path.display()
+                );
+                thread::sleep(Duration::from_millis(MARKER_WAIT_POLL_MS));
+            }
+        }
+
+        fn assert_reaped_immediately(pid: i32) {
+            let status = kill(Pid::from_raw(pid), None);
+            assert_eq!(
+                status,
+                Err(Errno::ESRCH),
+                "expected direct child PID {pid} to be reaped immediately, got {status:?}"
+            );
+        }
+
+        fn assert_terminated_within_budget(pid: i32) {
+            let started = Instant::now();
+            let timeout = Duration::from_millis(TEST_TEARDOWN_TIMEOUT_MS);
+            loop {
+                if kill(Pid::from_raw(pid), None) == Err(Errno::ESRCH) {
+                    return;
+                }
+                assert!(
+                    started.elapsed() < timeout,
+                    "descendant PID {pid} remained alive past teardown budget"
+                );
+                thread::sleep(Duration::from_millis(MARKER_WAIT_POLL_MS));
+            }
+        }
+
+        // r[verify bounded_exec.worker_startup.fallible]
+        // r[verify bounded_exec.worker_startup.cleanup]
+        // r[verify bounded_exec.worker_startup.verification]
+        #[test]
+        fn worker_start_failure_at_each_position_reaps_child_and_returns_typed_error() {
+            const POSITIONS: [Worker; 3] = [Worker::Stdin, Worker::Stdout, Worker::Stderr];
+
+            let directory = scratch_directory("worker-start-positions");
+            for (index, position) in POSITIONS.into_iter().enumerate() {
+                let pid_file = directory.join(format!("child-{index}.pid"));
+                let mut req = marker_request(
+                    &format!("printf '%s\\n' \"$$\" > \"$1\"; {NON_TERMINATING_SHELL_LOOP}"),
+                    &pid_file,
+                );
+                req.limits.timeout_ms = LONG_TIMEOUT_MS;
+                req.limits.stdin_max_bytes = TEST_STDIN_MAX_BYTES;
+                req.command.input = Input::Bytes(UNREAD_SMALL_INPUT.to_vec());
+
+                let alive_workers = Arc::new(AtomicUsize::new(0));
+                let pid_wait_path = pid_file.clone();
+                let mut spawner = CountingFailSpawner::new(
+                    position,
+                    FaultBehavior::IoError(io::ErrorKind::WouldBlock),
+                    Arc::clone(&alive_workers),
+                    Some(Box::new(move || {
+                        let _pid = wait_for_pid_file(&pid_wait_path);
+                    })),
+                );
+
+                let started = Instant::now();
+                let error = run_with_spawner(req, None, &mut spawner)
+                    .expect_err("injected worker startup failure must fail the run");
+                let elapsed = started.elapsed();
+
+                assert!(
+                    elapsed < Duration::from_secs(TEST_EXECUTION_UPPER_BOUND_SECS),
+                    "startup cleanup exceeded bound for {position:?}: {elapsed:?}"
+                );
+                assert!(
+                    error.source().is_some(),
+                    "WorkerStart must preserve the underlying OS error as Error::source()"
+                );
+                match error {
+                    RunError::WorkerStart {
+                        worker,
+                        error: os_error,
+                        cleanup_errors,
+                    } => {
+                        assert_eq!(worker, position);
+                        assert_eq!(os_error.kind(), io::ErrorKind::WouldBlock);
+                        assert!(
+                            cleanup_errors.is_empty(),
+                            "clean process-group teardown for {position:?} had cleanup errors: {cleanup_errors:?}"
+                        );
+                    }
+                    other => panic!("expected WorkerStart for {position:?}, got {other:?}"),
+                }
+                let child_pid = wait_for_pid_file(&pid_file);
+                assert_reaped_immediately(child_pid);
+                assert_eq!(
+                    alive_workers.load(Ordering::Acquire),
+                    0,
+                    "all started workers must finish before returning for {position:?}"
+                );
+            }
+            std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+        }
+
+        // r[verify bounded_exec.worker_startup.cleanup]
+        // r[verify bounded_exec.worker_startup.verification]
+        #[test]
+        fn worker_start_failure_in_process_group_tears_down_descendants_holding_pipes() {
+            let directory = scratch_directory("worker-start-pgroup");
+            let child_pid_file = directory.join("child.pid");
+            let descendant_pid_file = directory.join("descendant.pid");
+            let mut req = request(&format!(
+                "exec 3<&0; ({NON_TERMINATING_SHELL_LOOP}) <&3 & printf '%s\\n' \"$!\" > \"$2\"; printf '%s\\n' \"$$\" > \"$1\"; {NON_TERMINATING_SHELL_LOOP}"
+            ));
+            req.command.args.push(OsString::from("sh"));
+            req.command.args.push(child_pid_file.as_os_str().to_owned());
+            req.command
+                .args
+                .push(descendant_pid_file.as_os_str().to_owned());
+            req.limits.timeout_ms = LONG_TIMEOUT_MS;
+            req.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+            req.command.input = Input::Bytes(pipe_exceeding_input());
+            req.termination_scope = TerminationScope::ProcessGroup;
+
+            let alive_workers = Arc::new(AtomicUsize::new(0));
+            let wait_child = child_pid_file.clone();
+            let wait_descendant = descendant_pid_file.clone();
+            let mut spawner = CountingFailSpawner::new(
+                Worker::Stderr,
+                FaultBehavior::IoError(io::ErrorKind::OutOfMemory),
+                Arc::clone(&alive_workers),
+                Some(Box::new(move || {
+                    let _descendant = wait_for_pid_file(&wait_descendant);
+                    let _child = wait_for_pid_file(&wait_child);
+                    thread::sleep(Duration::from_millis(WORKER_SETTLE_MS));
+                })),
+            );
+
+            let started = Instant::now();
+            let error = run_with_spawner(req, None, &mut spawner)
+                .expect_err("injected stderr worker startup failure must fail the run");
+
+            assert!(started.elapsed() < Duration::from_secs(TEST_EXECUTION_UPPER_BOUND_SECS));
+            match error {
+                RunError::WorkerStart {
+                    worker,
+                    error: os_error,
+                    cleanup_errors,
+                } => {
+                    assert_eq!(worker, Worker::Stderr);
+                    assert_eq!(os_error.kind(), io::ErrorKind::OutOfMemory);
+                    assert!(
+                        cleanup_errors.is_empty(),
+                        "process-group teardown must close descendant pipes cleanly: {cleanup_errors:?}"
+                    );
+                }
+                other => panic!("expected WorkerStart(Stderr), got {other:?}"),
+            }
+            let child_pid = wait_for_pid_file(&child_pid_file);
+            let descendant_pid = wait_for_pid_file(&descendant_pid_file);
+            assert_reaped_immediately(child_pid);
+            assert_terminated_within_budget(descendant_pid);
+            assert_eq!(alive_workers.load(Ordering::Acquire), 0);
+            std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+        }
+
+        // r[verify bounded_exec.worker_startup.cleanup]
+        // r[verify bounded_exec.worker_startup.boundary]
+        // r[verify bounded_exec.worker_startup.verification]
+        #[test]
+        fn worker_start_failure_records_cleanup_uncertainty_when_descendant_retains_pipes() {
+            let directory = scratch_directory("worker-start-uncertainty");
+            let child_pid_file = directory.join("child.pid");
+            let descendant_pid_file = directory.join("descendant.pid");
+            let mut req = request(&format!(
+                "exec 3<&0; ({NON_TERMINATING_SHELL_LOOP}) <&3 & printf '%s\\n' \"$!\" > \"$2\"; printf '%s\\n' \"$$\" > \"$1\"; {NON_TERMINATING_SHELL_LOOP}"
+            ));
+            req.command.args.push(OsString::from("sh"));
+            req.command.args.push(child_pid_file.as_os_str().to_owned());
+            req.command
+                .args
+                .push(descendant_pid_file.as_os_str().to_owned());
+            req.limits.timeout_ms = LONG_TIMEOUT_MS;
+            req.limits.teardown_timeout_ms = SHORT_TEARDOWN_TIMEOUT_MS;
+            req.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+            req.command.input = Input::Bytes(pipe_exceeding_input());
+            // Direct-child scope leaves the descendant alive holding stdin and
+            // stdout open, modeling a scope/platform unable to terminate
+            // descendants completely.
+            req.termination_scope = TerminationScope::Child;
+
+            let alive_workers = Arc::new(AtomicUsize::new(0));
+            let wait_child = child_pid_file.clone();
+            let wait_descendant = descendant_pid_file.clone();
+            let mut spawner = CountingFailSpawner::new(
+                Worker::Stderr,
+                FaultBehavior::IoError(io::ErrorKind::OutOfMemory),
+                Arc::clone(&alive_workers),
+                Some(Box::new(move || {
+                    let _descendant = wait_for_pid_file(&wait_descendant);
+                    let _child = wait_for_pid_file(&wait_child);
+                    thread::sleep(Duration::from_millis(WORKER_SETTLE_MS));
+                })),
+            );
+
+            let started = Instant::now();
+            let error = run_with_spawner(req, None, &mut spawner)
+                .expect_err("injected stderr worker startup failure must fail the run");
+            let elapsed = started.elapsed();
+
+            let descendant_pid = wait_for_pid_file(&descendant_pid_file);
+            let cleanup_descendant = ProcessCleanupGuard(Some(descendant_pid));
+            let child_pid = wait_for_pid_file(&child_pid_file);
+
+            assert!(elapsed < Duration::from_secs(TEST_EXECUTION_UPPER_BOUND_SECS));
+            assert_reaped_immediately(child_pid);
+            assert_eq!(
+                alive_workers.load(Ordering::Acquire),
+                0,
+                "timed-out workers must still stop and join instead of detaching"
+            );
+            match error {
+                RunError::WorkerStart {
+                    worker,
+                    error: os_error,
+                    cleanup_errors,
+                } => {
+                    assert_eq!(worker, Worker::Stderr);
+                    assert_eq!(os_error.kind(), io::ErrorKind::OutOfMemory);
+                    assert!(
+                        cleanup_errors.iter().any(|item| matches!(
+                            item,
+                            RunError::WorkerTeardownTimedOut(Worker::Stdin)
+                        )),
+                        "expected stdin teardown timeout in cleanup_errors, got {cleanup_errors:?}"
+                    );
+                    assert!(
+                        cleanup_errors.iter().any(|item| matches!(
+                            item,
+                            RunError::WorkerTeardownTimedOut(Worker::Stdout)
+                        )),
+                        "expected stdout teardown timeout in cleanup_errors, got {cleanup_errors:?}"
+                    );
+                }
+                other => panic!("expected WorkerStart(Stderr), got {other:?}"),
+            }
+            drop(cleanup_descendant);
+            std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+        }
+
+        // r[verify bounded_exec.worker_startup.cleanup]
+        // r[verify bounded_exec.worker_startup.verification]
+        #[test]
+        fn worker_start_failure_does_not_deadlock_on_blocked_stdin_or_continuous_output() {
+            const POSITIONS: [Worker; 2] = [Worker::Stdout, Worker::Stderr];
+
+            let directory = scratch_directory("worker-start-flood");
+            for (index, position) in POSITIONS.into_iter().enumerate() {
+                let pid_file = directory.join(format!("flood-{index}.pid"));
+                let mut req = marker_request(
+                    "printf '%s\\n' \"$$\" > \"$1\"; while :; do printf 'stdout-flood\\n'; printf 'stderr-flood\\n' >&2; done",
+                    &pid_file,
+                );
+                req.limits.timeout_ms = LONG_TIMEOUT_MS;
+                req.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+                req.limits.stdout_max_bytes = SMALL_OUTPUT_MAX_BYTES;
+                req.limits.stderr_max_bytes = SMALL_OUTPUT_MAX_BYTES;
+                req.command.input = Input::Bytes(pipe_exceeding_input());
+
+                let alive_workers = Arc::new(AtomicUsize::new(0));
+                let wait_path = pid_file.clone();
+                let mut spawner = CountingFailSpawner::new(
+                    position,
+                    FaultBehavior::IoError(io::ErrorKind::WouldBlock),
+                    Arc::clone(&alive_workers),
+                    Some(Box::new(move || {
+                        let _pid = wait_for_pid_file(&wait_path);
+                        thread::sleep(Duration::from_millis(WORKER_SETTLE_MS));
+                    })),
+                );
+
+                let started = Instant::now();
+                let error = run_with_spawner(req, None, &mut spawner)
+                    .expect_err("injected worker startup failure must fail the run");
+
+                assert!(started.elapsed() < Duration::from_secs(TEST_EXECUTION_UPPER_BOUND_SECS));
+                match error {
+                    RunError::WorkerStart {
+                        worker,
+                        cleanup_errors,
+                        ..
+                    } => {
+                        assert_eq!(worker, position);
+                        assert!(
+                            cleanup_errors.is_empty(),
+                            "cleanup under blocked stdin / flooded output recorded errors: {cleanup_errors:?}"
+                        );
+                    }
+                    other => panic!("expected WorkerStart({position:?}), got {other:?}"),
+                }
+                let child_pid = wait_for_pid_file(&pid_file);
+                assert_reaped_immediately(child_pid);
+                assert_eq!(alive_workers.load(Ordering::Acquire), 0);
+            }
+            std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+        }
+
+        // r[verify bounded_exec.worker_startup.unwind]
+        // r[verify bounded_exec.worker_startup.verification]
+        #[test]
+        fn worker_start_unwind_reaps_child_and_joins_started_workers() {
+            let directory = scratch_directory("worker-start-unwind");
+            let pid_file = directory.join("unwind.pid");
+            let mut req = marker_request(
+                &format!("printf '%s\\n' \"$$\" > \"$1\"; {NON_TERMINATING_SHELL_LOOP}"),
+                &pid_file,
+            );
+            req.limits.timeout_ms = LONG_TIMEOUT_MS;
+            req.limits.stdin_max_bytes = PIPE_EXCEEDING_INPUT_BYTES;
+            req.command.input = Input::Bytes(pipe_exceeding_input());
+
+            let alive_workers = Arc::new(AtomicUsize::new(0));
+            let wait_path = pid_file.clone();
+            let mut spawner = CountingFailSpawner::new(
+                Worker::Stderr,
+                FaultBehavior::Panic,
+                Arc::clone(&alive_workers),
+                Some(Box::new(move || {
+                    let _pid = wait_for_pid_file(&wait_path);
+                    thread::sleep(Duration::from_millis(WORKER_SETTLE_MS));
+                })),
+            );
+
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_with_spawner(req, None, &mut spawner)
+            }));
+
+            assert!(caught.is_err(), "injected unwind must propagate cleanly");
+            let child_pid = wait_for_pid_file(&pid_file);
+            assert_reaped_immediately(child_pid);
+            assert_eq!(
+                alive_workers.load(Ordering::Acquire),
+                0,
+                "unwind guard must finish started workers instead of detaching them"
+            );
+            std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+        }
+
+        // r[verify bounded_exec.worker_startup.cleanup]
+        #[test]
+        fn missing_pipe_reaps_child_and_reports_missing_pipe() {
+            let directory = scratch_directory("missing-pipe-reap");
+            let pid_file = directory.join("missing-pipe.pid");
+            let req = marker_request(
+                &format!("printf '%s\\n' \"$$\" > \"$1\"; {NON_TERMINATING_SHELL_LOOP}"),
+                &pid_file,
+            );
+            let mut command = prepare_command(&req.command, req.termination_scope);
+            let mut child = command.spawn().expect("fixture child must spawn");
+            let _pid = wait_for_pid_file(&pid_file);
+            // Simulate a missing stderr pipe before handing child to StartupGuard.
+            drop(child.stderr.take());
+
+            let mut guard = StartupGuard::new(child, req.termination_scope, req.limits);
+            guard.take_stdout().expect("stdout pipe is present");
+            let error = guard
+                .take_stderr()
+                .expect_err("missing stderr pipe must fail");
+
+            assert!(matches!(error, RunError::MissingPipe(Worker::Stderr)));
+            let child_pid = wait_for_pid_file(&pid_file);
+            assert_reaped_immediately(child_pid);
+            std::fs::remove_dir_all(&directory).expect("scratch directory must be removed");
+        }
     }
 }
